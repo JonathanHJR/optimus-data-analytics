@@ -222,6 +222,7 @@ def generate_ai_insights(client: genai.Client, summary_text: str) -> str:
         config=genai_types.GenerateContentConfig(
             system_instruction=AI_SYSTEM_PROMPT,
             max_output_tokens=1024,
+            thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
         ),
     )
     return response.text
