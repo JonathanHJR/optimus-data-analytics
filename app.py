@@ -12,9 +12,16 @@ Run with:  streamlit run app.py
 """
 
 import io
+import os
 import pandas as pd
 import streamlit as st
 import plotly.express as px
+from google import genai
+from google.genai import types as genai_types
+
+# Verify this against the model picker at aistudio.google.com if AI Insights
+# calls start failing — free-tier model names/availability change over time.
+GEMINI_MODEL = "gemini-2.5-flash"
 
 st.set_page_config(page_title="Optimus Analytics", layout="wide")
 
@@ -148,6 +155,78 @@ def kpi_row(df, cols):
     c3.metric("Date fields detected", len(cols["date"]))
 
 
+AI_SYSTEM_PROMPT = """You are a construction quality/safety analyst reviewing \
+inspection data exported from Optimus (O2), a JTC infrastructure-project \
+system. You're given aggregated statistics and a sample of free-text \
+observation notes — not the raw row data. Identify the most important \
+patterns: recurring root causes, risk concentrations, and any aging/overdue \
+concerns. Reference the actual categories and numbers given; do not invent \
+data that isn't in the summary. Respond in markdown, under 400 words, with \
+short headers and bullet points."""
+
+
+def get_gemini_client() -> genai.Client | None:
+    """Resolve an API key from Streamlit secrets (local secrets.toml or the
+    Streamlit Cloud app's Settings -> Secrets) or the environment."""
+    api_key = None
+    try:
+        api_key = st.secrets.get("GEMINI_API_KEY")
+    except Exception:
+        pass
+    api_key = api_key or os.environ.get("GEMINI_API_KEY")
+    return genai.Client(api_key=api_key) if api_key else None
+
+
+def build_data_summary(df: pd.DataFrame, cols: dict, has_aging: bool) -> str:
+    """Aggregate the uploaded data into a compact text summary for the AI
+    call — counts and samples only, never the full raw row dump."""
+    lines = [f"Total records: {len(df)}"]
+
+    if RAISED_DATE_COL in df.columns:
+        raised = pd.to_datetime(df[RAISED_DATE_COL], errors="coerce", dayfirst=True).dropna()
+        if not raised.empty:
+            lines.append(f"Date range ({RAISED_DATE_COL}): {raised.min().date()} to {raised.max().date()}")
+
+    if has_aging:
+        aging = compute_aging(df)
+        valid_age = aging["Age (days)"].dropna()
+        if not valid_age.empty:
+            lines.append(
+                f"Aging: median {int(valid_age.median())} days, "
+                f"{int(aging['Is Closed'].sum())} closed, "
+                f"{int(aging['Is Overdue'].sum())} open & overdue"
+            )
+
+    if cols["status"]:
+        lines.append(f"\n{cols['status'][0]} counts:")
+        lines.append(df[cols["status"][0]].value_counts().head(10).to_string())
+
+    for cat_col in cols["category"][:5]:
+        lines.append(f"\n{cat_col} counts (top 8):")
+        lines.append(df[cat_col].value_counts().head(8).to_string())
+
+    text_cols = [c for c in ["Observation & Comments", "Recommendations and Remarks, where required"] if c in df.columns]
+    for text_col in text_cols:
+        samples = df[text_col].dropna().astype(str).str.slice(0, 200).unique()[:15]
+        if len(samples):
+            lines.append(f"\nSample of '{text_col}' (up to 15, truncated):")
+            lines.extend(f"- {s}" for s in samples)
+
+    return "\n".join(lines)
+
+
+def generate_ai_insights(client: genai.Client, summary_text: str) -> str:
+    response = client.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=summary_text,
+        config=genai_types.GenerateContentConfig(
+            system_instruction=AI_SYSTEM_PROMPT,
+            max_output_tokens=1024,
+        ),
+    )
+    return response.text
+
+
 # ----------------------------------------------------------------------
 # Sidebar — upload
 # ----------------------------------------------------------------------
@@ -205,8 +284,8 @@ if cols["category"]:
 # ----------------------------------------------------------------------
 # Tabs — one per domain team
 # ----------------------------------------------------------------------
-tab_pm, tab_cost, tab_safety, tab_quality, tab_raw = st.tabs(
-    ["📋 Project Mgt", "💰 Cost", "⚠️ Safety", "✅ Quality", "🗂 Raw Data"]
+tab_pm, tab_cost, tab_safety, tab_quality, tab_ai, tab_raw = st.tabs(
+    ["📋 Project Mgt", "💰 Cost", "⚠️ Safety", "✅ Quality", "🤖 AI Insights", "🗂 Raw Data"]
 )
 
 # ---- Project Management: aging & workflow bottlenecks ----
@@ -302,6 +381,31 @@ with tab_quality:
         st.plotly_chart(fig, use_container_width=True)
     else:
         st.caption("No categorical columns detected.")
+
+# ---- AI Insights: Gemini-generated summary of the aggregated data ----
+with tab_ai:
+    st.subheader("AI Insights")
+    client = get_gemini_client()
+    if client is None:
+        st.info(
+            "No Gemini API key found. Add `GEMINI_API_KEY` to "
+            "`.streamlit/secrets.toml` locally, or under the app's "
+            "Settings -> Secrets on Streamlit Cloud, to enable this tab."
+        )
+    else:
+        st.caption(
+            "Sends aggregated counts and a small sample of free-text notes "
+            "(never the full raw data) to Gemini for a written summary."
+        )
+        if st.button("Generate AI Insights"):
+            with st.spinner("Asking Gemini..."):
+                summary_text = build_data_summary(df, cols, has_exact_aging_cols)
+                try:
+                    st.session_state["ai_insights"] = generate_ai_insights(client, summary_text)
+                except genai.errors.APIError as e:
+                    st.error(f"AI request failed: {e}")
+        if "ai_insights" in st.session_state:
+            st.markdown(st.session_state["ai_insights"])
 
 # ---- Raw data + detected schema ----
 with tab_raw:
