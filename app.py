@@ -407,6 +407,12 @@ with tab_ai:
                     st.error(f"AI request failed: {e}")
         if "ai_insights" in st.session_state:
             st.markdown(st.session_state["ai_insights"])
+            st.download_button(
+                "Download AI Insights (Markdown)",
+                st.session_state["ai_insights"].encode("utf-8"),
+                "ai_insights.md",
+                "text/markdown",
+            )
 
 # ---- Raw data + detected schema ----
 with tab_raw:
