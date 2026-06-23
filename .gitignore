@@ -1,0 +1,16 @@
+# Real Optimus/government export data — never commit, see CLAUDE.md governance section
+Quality Defects Inspection Forms/
+*.xlsx
+*.xls
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Claude Code local settings
+.claude/settings.local.json
