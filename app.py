@@ -246,13 +246,29 @@ if uploaded is None:
     )
     st.stop()
 
-sheets = load_excel(uploaded.read())
+try:
+    sheets = load_excel(uploaded.read())
+except Exception:
+    st.error(
+        "Couldn't read that file as an Excel workbook. Make sure it's a "
+        "valid, uncorrupted `.xlsx`/`.xls` export from Optimus, then "
+        "re-upload it."
+    )
+    st.stop()
+
+if not sheets or all(s.empty for s in sheets.values()):
+    st.warning("This file has no data in any sheet — nothing to analyse.")
+    st.stop()
+
 sheet_name = (
     st.sidebar.selectbox("Sheet", list(sheets.keys()))
     if len(sheets) > 1
     else list(sheets.keys())[0]
 )
 df = sheets[sheet_name].copy()
+if df.empty:
+    st.warning(f"Sheet '{sheet_name}' has no rows — nothing to analyse.")
+    st.stop()
 df.columns = [str(c).strip() for c in df.columns]
 df = consolidate_taxonomy(df)
 cols = guess_columns(df)
