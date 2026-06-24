@@ -8,67 +8,103 @@ projects) that we have **no backend control or configuration rights** over.
 The workflow is deliberately export-based:
 1. **Export** data from Optimus as an Excel file (`.xlsx`).
 2. **Upload** that file into this app.
-3. **Analyse** — the app parses it and produces domain-specific dashboards.
+3. **Analyse** — the app parses it generically and an AI tab interprets it.
 
 This export-then-upload pipeline is the core constraint: we cannot change the
 Optimus website, so all logic lives downstream of the Excel export.
 
-## Domain teams (the four dashboard tabs)
-The app serves four domain teams, each with its own tab:
+## Architecture decision: no per-form-type logic (2026-06-24)
+Optimus has many export form types (Quality Defects Inspection, Safety
+Observation, and more to come) with **different, unrelated schemas**. The
+app originally had four "domain team" tabs (Project Mgt / Cost / Safety /
+Quality) with hand-coded logic (`compute_aging()`, `consolidate_taxonomy()`,
+exact column-name constants) tuned specifically to the Quality Defects form.
 
-| Team | Focus | Current visualisations |
-|------|-------|------------------------|
-| Project Management | Aging & workflow bottlenecks | Aging histogram, workflow-status counts |
-| Cost (Contract Mgt) | Rectification / variation-order cost proxy | Recurring-issue frequency |
-| Safety | Risk concentration | Cross-tab risk heatmap |
-| Quality | Defect root cause | Defect-code frequency + Pareto chart |
+Once a second form type (Safety Observation) was confirmed with a
+genuinely different, much flatter schema (no due-date, no closure
+timestamp, no trade taxonomy), showing all four Quality-tuned tabs on
+Safety data became actively misleading — e.g. a "Quality — Defect
+Frequency" tab labeling Safety inspection-type counts. Rather than build a
+form-type detector and a growing per-form tab/logic mapping (which doesn't
+scale as more form types are added), **all exact-schema logic was
+removed**. The app now has three tabs:
 
-## Confirmed real export schema (Quality Defects Inspection Form)
-Confirmed against a real export (`Quality Defects Inspection Forms/Issues-51-
-Quality Defects Inspection Form.xlsx`, sheet `Issues`, 28 columns). Differs
-from the earlier guesses: it's `Workflow` (not "Workflow Status") and
-`Trade (Discipline)` (not "Trade"). Key fields:
-- Raised date: `Date of Inspection`
-- Target closure: `Due Date for Inspection Closure`
-- Status: `Workflow`
-- Last-edit timestamp: `Modification time`
-- **No actual closure-date column exists.** Only the target due date and a
-  last-modified timestamp.
-- **No single "Defect Code" column.** Instead there are 4 trade-specific
-  System+Component column pairs (Architectural/Electrical/Mechanical/C&S),
-  only one pair populated per row depending on `Trade (Discipline)`. Same
-  split for `Type of Inspection Check` and `Quality Inspection Check Item`.
-- `Created by` / `Modified by` contain real names — be mindful of this under
-  the data governance section below.
+| Tab | What it does |
+|-----|--------------|
+| 📊 Overview | Plain frequency counts (`bar_of_counts()`) for whatever status/category columns `guess_columns()` generically detects — no business-specific formulas, no aging, no Pareto, no heatmap. |
+| 🤖 AI Insights | Sends the same generic aggregate summary to Gemini, which infers the form type and what matters from the data itself (see AI layer section). This is where form-specific interpretation now lives — in the AI's reasoning, not in our code. |
+| 🗂 Raw Data | Unfiltered view + CSV download + detected column types (debugging aid). |
 
-`app.py` now wires to this exact schema:
-- `consolidate_taxonomy()` coalesces each trade-specific pair into one
-  unified `System` / `Component` / `Quality Inspection Check Item` /
-  `Type of Inspection Check` column, used for Cost/Quality/Safety grouping.
-- `compute_aging()` replaces the placeholder aging logic. Since there's no
-  real closure date, a Workflow value is treated as "closed" if it contains
-  `approved`, `closed`, `complete`, or `rejected` (see `CLOSED_WORKFLOW_KEYWORDS`
-  in app.py) — closed items are aged raised→Modification time, open items
-  raised→now, and "overdue" = open and past Due Date for Inspection Closure.
-  **This keyword heuristic is unconfirmed** — only two Workflow values have
-  been observed so far (`SO Rep Asst (S) Acknowledgment`, `Approved (PIR)`).
-  Revisit once a fuller export shows the full set of Workflow states.
-- The generic `guess_columns()` heuristic is kept as a fallback for sheets
-  that don't match this exact schema.
+`guess_columns()` (name/dtype/cardinality heuristics) is the **only**
+column-classification logic left, and it's intentionally form-agnostic.
+Removed entirely: `compute_aging()`, `consolidate_taxonomy()`,
+`QUALITY_TAXONOMY`, `CLOSED_WORKFLOW_KEYWORDS`, `RAISED_DATE_COL` /
+`DUE_DATE_COL` / `WORKFLOW_COL` / `MODIFIED_TIME_COL`.
+
+## Confirmed real export schemas
+### Quality Defects Inspection Form
+`Quality Inspection Forms/Issues-51-Quality Defects Inspection Form.xlsx`,
+sheet `Issues`, 28 columns, only 3 sample rows so far. Key fields: raised
+date `Date of Inspection`, target closure `Due Date for Inspection
+Closure`, status `Workflow`, last-edit `Modification time`. No actual
+closure-date column. No single "Defect Code" column — instead 4
+trade-specific System+Component column pairs (Architectural/Electrical/
+Mechanical/C&S), only one pair populated per row depending on `Trade
+(Discipline)`. `Created by` / `Modified by` contain real names.
+Confirmed `Workflow` values: `SO Rep Asst (S) Acknowledgment`, `Approved
+(PIR)`.
+
+### Safety Observation Form
+`Safety Observation Forms/Issues-51-Safety Observation Form.xlsx`, sheet
+`Issues`, 8 columns, **141 sample rows** (much fuller sample). Far flatter
+than the Quality form: `ID`, `S/N`, `Workflow`, `Inspection Category` (2
+values: Observation Regime / Assessment Regime), `Inspection Type` (2
+values: Physical / Drone), `Inspection Date`, `Description of Observation`
+(free text), `JTC SWO Recommendation` (constant `"N.A."` in this sample).
+**No due date, no closure/modification timestamp, no trade taxonomy** —
+genuinely less metadata than the Quality form, not just a different shape
+of the same thing. Confirmed `Workflow` values: `Approved` (134/141),
+`SO Acknowledgement` (4), `RE/ RTO Verification` (3).
+
+Across both forms, 5 distinct `Workflow` values have now been observed and
+all are consistent with a simple "contains approved/closed/complete/
+rejected → terminal" reading — though that heuristic is no longer encoded
+in app.py (see architecture decision above); it's left to the AI's
+judgment now.
+
+### pandas dtype bug fixed (2026-06-24)
+`guess_columns()`'s category detection checked `series.dtype == "object"`,
+which fails on pandas ≥ 2.x/3.x's newer dedicated string dtype (`"str"`,
+distinct from legacy `"object"`) — confirmed on pandas 3.0.3. This silently
+misclassified categorical columns as free text on **every** upload; it was
+masked for the Quality form only because its categories happened to come
+through a since-removed manual taxonomy override, not through this check.
+Fixed by switching to `pd.api.types.is_string_dtype()`, which handles both
+dtypes.
 
 ## Next steps when more data is available
-1. Confirm the full set of `Workflow` values to validate/replace the
-   closed-state keyword heuristic above.
-2. Consider contractor-level quality scoring.
-3. Decide whether other Optimus export types (Safety, Cost-specific forms)
-   need their own exact-schema wiring, or continue to share this one.
+1. Get a sample of a third Optimus form type to stress-test that the
+   generic approach (no per-form logic) continues to hold up, not just for
+   two forms.
+2. Consider contractor-level quality scoring (Quality form specific, on
+   hold pending a fuller export).
 
 ## AI layer (added for the public demo — dummy data only)
 The "🤖 AI Insights" tab sends an aggregated text summary of the uploaded
-data — counts, aging stats, and a capped sample of free-text notes, never
-the full raw rows — to the **Gemini API** (`google-genai` SDK,
-`GEMINI_MODEL = "gemini-2.5-flash"` in app.py). `build_data_summary()`
-builds that summary; `generate_ai_insights()` makes the single call.
+data — counts and a capped sample of free-text notes, never the full raw
+rows — to the **Gemini API** (`google-genai` SDK, `GEMINI_MODEL =
+"gemini-2.5-flash"` in app.py). `build_data_summary(df, cols)` builds that
+summary entirely from `guess_columns()`'s generic output (no form-specific
+fields referenced by name); `generate_ai_insights()` makes the single call.
+`AI_SYSTEM_PROMPT` explicitly tells Gemini it isn't told the form type in
+advance and should infer it from the data — confirmed working well: given
+the Safety form's summary, Gemini correctly opened its response with "This
+data appears to be from Safety Observations forms" unprompted.
+- **Free-text column selection is also generic**: a text column is sampled
+  only if its average word count per value is ≥ 3 (multi-word narrative
+  text), which cleanly separates genuine notes (e.g. `Description of
+  Observation`) from IDs/serial numbers (e.g. `ID`, `S/N`) without
+  hardcoding any column names — works the same on any form type.
 - **Provider choice**: deliberately Gemini, not Claude/Anthropic — the
   Claude subscription used for development (this Claude Code session) is
   not the user's own and should not be wired into the deployed app. Gemini
@@ -86,14 +122,19 @@ builds that summary; `generate_ai_insights()` makes the single call.
 - **Cost control**: gated behind a "Generate AI Insights" button (not
   auto-run on every Streamlit rerun/upload) and the summary text itself is
   capped (top 5 category columns, top 8 values each, ≤15 sampled free-text
-  values) to keep each call small and within free-tier limits.
+  values per qualifying text column) to keep each call small and within
+  free-tier limits.
+- **Reliability note**: free-tier Gemini calls can return `503 UNAVAILABLE`
+  under demand spikes (observed in practice) — currently surfaced as a
+  plain `st.error`, not auto-retried. Worth adding retry-with-backoff if
+  this becomes frequent.
 - **Governance reminder**: this was added on the explicit assumption that
   only public/dummy data reaches this app (see Data governance below) — the
-  real export's `Created by` / `Modified by` / `Observation & Comments`
-  fields contain real names and project specifics. Revisit whether an AI
-  layer is acceptable at all once real Optimus data is in scope, and note
-  Gemini's free tier may have different data-usage terms than a paid API
-  key — re-check before ever pointing this at real data.
+  real exports' `Created by` / `Modified by` / observation-notes fields
+  contain real names and project specifics. Revisit whether an AI layer is
+  acceptable at all once real Optimus data is in scope, and note Gemini's
+  free tier may have different data-usage terms than a paid API key —
+  re-check before ever pointing this at real data.
 
 ## Data governance — IMPORTANT
 Real Optimus/O2 records are **government data**. Before pointing this app at

@@ -1,10 +1,12 @@
 # Optimus Data Analytics Dashboard
 
-A Streamlit dashboard for analysing Quality/Defects data exported from
-**Optimus (O2)** — a Singapore government system used on JTC infrastructure
-projects. Export an Excel file from Optimus, upload it here, and get
-domain-specific dashboards for four project teams plus an AI-generated
-written summary.
+A Streamlit dashboard for analysing data exported from **Optimus (O2)** — a
+Singapore government system used on JTC infrastructure projects. Optimus has
+many export form types (Quality Defects Inspection, Safety Observation, and
+more) with different schemas, so this app deliberately avoids hardcoding
+logic to any one form. Export an Excel file from Optimus, upload it here,
+and get a generic aggregate overview plus an AI-generated written summary
+that adapts to whatever form you uploaded.
 
 **Live demo:** https://optimus-data-analytics.streamlit.app
 *(demo only — upload sample/dummy data, never real government exports; see
@@ -12,19 +14,19 @@ written summary.
 
 ## Features
 
-- **📋 Project Mgt** — workflow-status breakdown and aging/overdue tracking
-- **💰 Cost** — recurring-issue frequency as a rectification-cost proxy
-- **⚠️ Safety** — cross-tab risk heatmap across two categorical fields
-- **✅ Quality** — defect frequency and a Pareto (80/20) chart
+- **📊 Overview** — plain frequency counts for whatever status/category
+  columns are auto-detected — no form-specific formulas
 - **🤖 AI Insights** — sends an aggregated summary (counts + a small sample
-  of free-text notes, never the raw rows) to the Gemini API for a written
-  analysis
+  of free-text notes, never the raw rows) to the Gemini API, which infers
+  the form type and what matters most from the data itself
 - **🗂 Raw Data** — view/filter the uploaded sheet and download it as CSV
 
-The app auto-detects column types from whatever sheet you upload, and wires
-in exact-field logic when it recognises the real Optimus "Quality Defects
-Inspection Form" schema (see `CLAUDE.md` for the full schema notes and the
-reasoning behind specific design choices).
+The app auto-detects column types from whatever sheet you upload (date,
+status, category, free text) using only generic signals — column name
+keywords, dtype, and cardinality — never exact field names from any one
+form. See `CLAUDE.md` for the full schema notes from the two form types
+confirmed so far, and the reasoning behind dropping form-specific logic in
+favor of this generic-detection-plus-AI approach.
 
 ## Tech stack
 

@@ -1,12 +1,13 @@
 """
 Optimus Data Analytics Dashboard
 ---------------------------------
-A starter Streamlit app for analysing Quality/Defects (and similar) data
-exported from the Optimus (O2) platform as Excel files.
-
-Designed to adapt to whatever columns your export actually contains, so it
-works even before you've confirmed exact column names. Four domain-team tabs:
-Project Management, Cost (Contract Mgt), Safety, and Quality.
+A Streamlit app for analysing exports from the Optimus (O2) platform as
+Excel files. Optimus has many export form types (Quality Defects
+Inspection, Safety Observation, and more to come) with different schemas,
+so this app deliberately avoids hardcoding logic to any one form's exact
+column names. It auto-detects column types generically, shows a quick
+aggregate overview, and leaves the actual interpretation to an AI Insights
+tab — that's the part that should adapt per form type, not our code.
 
 Run with:  streamlit run app.py
 """
@@ -25,37 +26,9 @@ GEMINI_MODEL = "gemini-2.5-flash"
 
 st.set_page_config(page_title="Optimus Analytics", page_icon="🏗️", layout="wide")
 
-# Matches .streamlit/config.toml's primaryColor, so bar/line charts read as
-# part of the same theme instead of Plotly's unrelated default palette.
+# Matches .streamlit/config.toml's primaryColor, so charts read as part of
+# the same theme instead of Plotly's unrelated default palette.
 CHART_ACCENT_COLOR = "#0B5394"
-
-# ----------------------------------------------------------------------
-# Confirmed Optimus "Quality Defects Inspection Form" export schema.
-# Trade-specific column pairs are mutually exclusive per row (only the
-# pair matching that row's Trade is populated), so we coalesce each
-# group into a single unified column the tabs can group/filter on.
-# ----------------------------------------------------------------------
-RAISED_DATE_COL = "Date of Inspection"
-DUE_DATE_COL = "Due Date for Inspection Closure"
-WORKFLOW_COL = "Workflow"
-MODIFIED_TIME_COL = "Modification time"
-
-QUALITY_TAXONOMY = {
-    "System": ["Architectural Systems", "Electrical Systems", "Mechanical Systems", "C&S Systems"],
-    "Component": ["Architectural Components", "Electrical Components", "Mechanical Components", "C&S Components"],
-    "Quality Inspection Check Item": [
-        "Quality Inspection Check Item (Archi/ C&S)", "Quality Inspection Check Item (M)",
-    ],
-    "Type of Inspection Check": [
-        "Type of Inspection Check (Archi/ C&S)", "Type of Inspection Check (M&E)",
-    ],
-}
-
-# Workflow values containing any of these are treated as a terminal/closed
-# state for aging purposes (no real closure-date column exists in the
-# export, so Modification time is used as the closure timestamp instead).
-# Revisit once a fuller export shows the full set of Workflow values.
-CLOSED_WORKFLOW_KEYWORDS = ["approved", "closed", "complete", "rejected"]
 
 
 # ----------------------------------------------------------------------
@@ -69,8 +42,9 @@ def load_excel(file_bytes: bytes) -> dict[str, pd.DataFrame]:
 
 
 def guess_columns(df: pd.DataFrame) -> dict[str, list[str]]:
-    """Heuristically classify columns so the app can build charts without
-    knowing the exact Optimus schema in advance."""
+    """Heuristically classify columns by shape alone (name + dtype +
+    cardinality) — no knowledge of any specific Optimus form's schema, so
+    this works the same regardless of which export form was uploaded."""
     date_cols, status_cols, category_cols, text_cols = [], [], [], []
 
     for col in df.columns:
@@ -80,7 +54,7 @@ def guess_columns(df: pd.DataFrame) -> dict[str, list[str]]:
         # Date detection: by name or by successful datetime parsing
         is_dateish = any(k in lower for k in ["date", "due", "closure", "raised", "time"])
         parsed_ok = False
-        if series.dtype == "object" or is_dateish:
+        if pd.api.types.is_string_dtype(series) or is_dateish:
             try:
                 parsed = pd.to_datetime(series, errors="coerce", dayfirst=True)
                 parsed_ok = parsed.notna().mean() > 0.5
@@ -97,7 +71,7 @@ def guess_columns(df: pd.DataFrame) -> dict[str, list[str]]:
 
         # Low-cardinality columns are good "category" candidates for grouping
         nunique = series.nunique(dropna=True)
-        if 1 < nunique <= max(30, len(df) * 0.5) and series.dtype == "object":
+        if 1 < nunique <= max(30, len(df) * 0.5) and pd.api.types.is_string_dtype(series):
             category_cols.append(col)
         else:
             text_cols.append(col)
@@ -108,37 +82,6 @@ def guess_columns(df: pd.DataFrame) -> dict[str, list[str]]:
         "category": category_cols,
         "text": text_cols,
     }
-
-
-def consolidate_taxonomy(df: pd.DataFrame) -> pd.DataFrame:
-    """Coalesce the trade-specific column groups (Architectural/Electrical/
-    Mechanical/C&S System+Component pairs etc.) into single unified columns,
-    so charts can group by one consistent field regardless of trade."""
-    for new_name, source_cols in QUALITY_TAXONOMY.items():
-        present = [c for c in source_cols if c in df.columns]
-        if present:
-            df[new_name] = df[present].bfill(axis=1).iloc[:, 0]
-    return df
-
-
-def compute_aging(df: pd.DataFrame) -> pd.DataFrame:
-    """Open-duration tracking using Workflow status as the closure signal:
-    closed items are aged raised -> Modification time, open items are aged
-    raised -> now. Overdue = still open and past Due Date for Inspection
-    Closure."""
-    raised = pd.to_datetime(df[RAISED_DATE_COL], errors="coerce", dayfirst=True)
-    due = pd.to_datetime(df[DUE_DATE_COL], errors="coerce", dayfirst=True)
-    modified = pd.to_datetime(df[MODIFIED_TIME_COL], errors="coerce", dayfirst=True)
-    now = pd.Timestamp.now()
-
-    is_closed = df[WORKFLOW_COL].astype(str).str.lower().str.contains(
-        "|".join(CLOSED_WORKFLOW_KEYWORDS), na=False
-    )
-    end = modified.where(is_closed, now)
-    age_days = (end - raised).dt.days
-    is_overdue = (~is_closed) & due.notna() & (now > due)
-
-    return pd.DataFrame({"Age (days)": age_days, "Is Closed": is_closed, "Is Overdue": is_overdue})
 
 
 def bar_of_counts(df, col, title, top_n=15):
@@ -160,13 +103,16 @@ def kpi_row(df, cols):
     c3.metric("Date fields detected", len(cols["date"]))
 
 
-AI_SYSTEM_PROMPT = """You are a construction quality/safety analyst reviewing \
-inspection data exported from Optimus (O2), a JTC infrastructure-project \
-system. You're given aggregated statistics and a sample of free-text \
-observation notes — not the raw row data. Identify the most important \
-patterns: recurring root causes, risk concentrations, and any aging/overdue \
-concerns. Reference the actual categories and numbers given; do not invent \
-data that isn't in the summary. Respond in markdown, under 400 words, with \
+AI_SYSTEM_PROMPT = """You are an analyst reviewing data exported from \
+Optimus (O2), a JTC infrastructure-project system. The export could be any \
+one of several Optimus form types (quality defects, safety observations, \
+or others) — infer what kind of form this is and what matters most from \
+the data itself, since you aren't told in advance. You're given aggregated \
+statistics and a sample of free-text notes — not the raw row data. \
+Identify the most important patterns: recurring themes, risk \
+concentrations, and any timing/workflow concerns visible in the data. \
+Reference the actual categories and numbers given; do not invent data \
+that isn't in the summary. Respond in markdown, under 400 words, with \
 short headers and bullet points."""
 
 
@@ -182,25 +128,17 @@ def get_gemini_client() -> genai.Client | None:
     return genai.Client(api_key=api_key) if api_key else None
 
 
-def build_data_summary(df: pd.DataFrame, cols: dict, has_aging: bool) -> str:
+def build_data_summary(df: pd.DataFrame, cols: dict) -> str:
     """Aggregate the uploaded data into a compact text summary for the AI
-    call — counts and samples only, never the full raw row dump."""
+    call — counts and samples only, never the full raw row dump. Built
+    entirely from the generic column detection above, so it works the same
+    regardless of which Optimus form type was uploaded."""
     lines = [f"Total records: {len(df)}"]
 
-    if RAISED_DATE_COL in df.columns:
-        raised = pd.to_datetime(df[RAISED_DATE_COL], errors="coerce", dayfirst=True).dropna()
-        if not raised.empty:
-            lines.append(f"Date range ({RAISED_DATE_COL}): {raised.min().date()} to {raised.max().date()}")
-
-    if has_aging:
-        aging = compute_aging(df)
-        valid_age = aging["Age (days)"].dropna()
-        if not valid_age.empty:
-            lines.append(
-                f"Aging: median {int(valid_age.median())} days, "
-                f"{int(aging['Is Closed'].sum())} closed, "
-                f"{int(aging['Is Overdue'].sum())} open & overdue"
-            )
+    if cols["date"]:
+        primary_date = pd.to_datetime(df[cols["date"][0]], errors="coerce", dayfirst=True).dropna()
+        if not primary_date.empty:
+            lines.append(f"Date range ({cols['date'][0]}): {primary_date.min().date()} to {primary_date.max().date()}")
 
     if cols["status"]:
         lines.append(f"\n{cols['status'][0]} counts:")
@@ -210,9 +148,14 @@ def build_data_summary(df: pd.DataFrame, cols: dict, has_aging: bool) -> str:
         lines.append(f"\n{cat_col} counts (top 8):")
         lines.append(df[cat_col].value_counts().head(8).to_string())
 
-    text_cols = [c for c in ["Observation & Comments", "Recommendations and Remarks, where required"] if c in df.columns]
-    for text_col in text_cols:
-        samples = df[text_col].dropna().astype(str).str.slice(0, 200).unique()[:15]
+    # Free text worth sampling has multiple words per value (observation
+    # notes); IDs/serial numbers are single "words" with no spaces, so this
+    # filters them out without hardcoding any column names.
+    for text_col in cols["text"]:
+        values = df[text_col].dropna().astype(str)
+        if values.empty or values.str.split().str.len().mean() < 3:
+            continue
+        samples = values.str.slice(0, 200).unique()[:15]
         if len(samples):
             lines.append(f"\nSample of '{text_col}' (up to 15, truncated):")
             lines.extend(f"- {s}" for s in samples)
@@ -244,10 +187,10 @@ if uploaded is None:
     st.title("Optimus Data Analytics Dashboard")
     st.info(
         "👈 Upload an Optimus Excel export in the sidebar to get started.\n\n"
-        "This starter app auto-detects date, status, and category columns and "
-        "builds a tab for each domain team. Once you confirm your real column "
-        "names, the charts can be tuned to exact fields (e.g. *Due Date for "
-        "Inspection Closure*, *Defect Code*, *Trade*)."
+        "Works with any Optimus export form — this app auto-detects date, "
+        "status, and category columns generically and shows a quick "
+        "aggregate overview, then lets AI Insights do the actual "
+        "interpretation."
     )
     st.stop()
 
@@ -275,17 +218,7 @@ if df.empty:
     st.warning(f"Sheet '{sheet_name}' has no rows — nothing to analyse.")
     st.stop()
 df.columns = [str(c).strip() for c in df.columns]
-df = consolidate_taxonomy(df)
 cols = guess_columns(df)
-for taxonomy_col in QUALITY_TAXONOMY:
-    if taxonomy_col in df.columns and taxonomy_col not in cols["category"]:
-        cols["category"].append(taxonomy_col)
-        if taxonomy_col in cols["text"]:
-            cols["text"].remove(taxonomy_col)
-
-has_exact_aging_cols = all(
-    c in df.columns for c in [RAISED_DATE_COL, DUE_DATE_COL, WORKFLOW_COL, MODIFIED_TIME_COL]
-)
 
 st.title("Optimus Data Analytics Dashboard")
 kpi_row(df, cols)
@@ -304,108 +237,31 @@ if cols["category"]:
                 df = df[df[filt_col].astype(str).isin(choices)]
 
 # ----------------------------------------------------------------------
-# Tabs — one per domain team
+# Tabs
 # ----------------------------------------------------------------------
-tab_pm, tab_cost, tab_safety, tab_quality, tab_ai, tab_raw = st.tabs(
-    ["📋 Project Mgt", "💰 Cost", "⚠️ Safety", "✅ Quality", "🤖 AI Insights", "🗂 Raw Data"]
-)
+tab_overview, tab_ai, tab_raw = st.tabs(["📊 Overview", "🤖 AI Insights", "🗂 Raw Data"])
 
-# ---- Project Management: aging & workflow bottlenecks ----
-with tab_pm:
-    st.subheader("Project Management — Aging & Workflow")
+# ---- Overview: generic aggregate counts, no per-form business logic ----
+with tab_overview:
+    st.subheader("Data Overview")
+    st.caption(
+        "Plain frequency counts from whatever status/category columns were "
+        "detected — no form-specific formulas. For actual interpretation, "
+        "see the AI Insights tab."
+    )
     if cols["status"]:
         st.plotly_chart(
             bar_of_counts(df, cols["status"][0], f"Records by {cols['status'][0]}"),
             use_container_width=True,
         )
-    if has_exact_aging_cols:
-        aging = compute_aging(df)
-        valid_age = aging["Age (days)"].dropna()
-        if not valid_age.empty:
-            fig = px.histogram(
-                aging.dropna(subset=["Age (days)"]), x="Age (days)", nbins=20,
-                title="Aging distribution (raised → closed, or raised → now if open)",
-                color_discrete_sequence=[CHART_ACCENT_COLOR],
+    if cols["category"]:
+        for cat_col in cols["category"][:5]:
+            st.plotly_chart(
+                bar_of_counts(df, cat_col, f"Counts by {cat_col}"),
+                use_container_width=True,
             )
-            st.plotly_chart(fig, use_container_width=True)
-            m1, m2 = st.columns(2)
-            m1.metric("Median age (days)", int(valid_age.median()))
-            m2.metric("Overdue (open & past due)", int(aging["Is Overdue"].sum()))
-    elif len(cols["date"]) >= 1:
-        date_col = st.selectbox("Date column for aging", cols["date"], key="pm_date")
-        d = pd.to_datetime(df[date_col], errors="coerce", dayfirst=True)
-        age_days = (pd.Timestamp.now().normalize() - d).dt.days
-        age_df = pd.DataFrame({"Age (days)": age_days.dropna()})
-        if not age_df.empty:
-            fig = px.histogram(age_df, x="Age (days)", nbins=20,
-                               title="Aging distribution (days since date)",
-                               color_discrete_sequence=[CHART_ACCENT_COLOR])
-            st.plotly_chart(fig, use_container_width=True)
-            st.metric("Median age (days)", int(age_df["Age (days)"].median()))
-    else:
-        st.caption("No date columns detected for aging analysis.")
-
-# ---- Cost: recurring defects -> cost impact proxy ----
-with tab_cost:
-    st.subheader("Cost — Recurring Issues (cost-impact proxy)")
-    st.caption(
-        "Frequency of recurring observations/locations is a proxy for "
-        "rectification effort and potential variation-order cost."
-    )
-    if cols["category"]:
-        default_idx = cols["category"].index("Component") if "Component" in cols["category"] else 0
-        cost_col = st.selectbox("Group by", cols["category"], index=default_idx, key="cost_cat")
-        st.plotly_chart(
-            bar_of_counts(df, cost_col, f"Recurring counts by {cost_col}"),
-            use_container_width=True,
-        )
-    else:
-        st.caption("No categorical columns detected.")
-
-# ---- Safety: risk heatmap across two categories ----
-with tab_safety:
-    st.subheader("Safety — Risk Heatmap")
-    if len(cols["category"]) >= 2:
-        c1, c2 = st.columns(2)
-        row_dim = c1.selectbox("Rows", cols["category"], key="safe_row")
-        col_dim = c2.selectbox(
-            "Columns",
-            [c for c in cols["category"] if c != row_dim],
-            key="safe_col",
-        )
-        pivot = pd.crosstab(df[row_dim], df[col_dim])
-        fig = px.imshow(
-            pivot, text_auto=True, aspect="auto",
-            title=f"{row_dim} vs {col_dim}", color_continuous_scale="Reds",
-        )
-        fig.update_layout(height=500)
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.caption("Need at least two categorical columns for a heatmap.")
-
-# ---- Quality: defect-code frequency / root cause ----
-with tab_quality:
-    st.subheader("Quality — Defect Frequency / Root Cause")
-    if cols["category"]:
-        default_idx = cols["category"].index("Component") if "Component" in cols["category"] else 0
-        q_col = st.selectbox("Defect/check column", cols["category"], index=default_idx, key="q_cat")
-        st.plotly_chart(
-            bar_of_counts(df, q_col, f"Frequency by {q_col}"),
-            use_container_width=True,
-        )
-        # Pareto view
-        counts = df[q_col].value_counts().reset_index()
-        counts.columns = [q_col, "Count"]
-        counts["Cumulative %"] = (
-            counts["Count"].cumsum() / counts["Count"].sum() * 100
-        )
-        fig = px.line(counts, x=q_col, y="Cumulative %", markers=True,
-                      title="Pareto (cumulative %)",
-                      color_discrete_sequence=[CHART_ACCENT_COLOR])
-        fig.add_hline(y=80, line_dash="dash", line_color="red")
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.caption("No categorical columns detected.")
+    if not cols["status"] and not cols["category"]:
+        st.caption("No status or categorical columns detected for an overview.")
 
 # ---- AI Insights: Gemini-generated summary of the aggregated data ----
 with tab_ai:
@@ -424,7 +280,7 @@ with tab_ai:
         )
         if st.button("Generate AI Insights"):
             with st.spinner("Asking Gemini..."):
-                summary_text = build_data_summary(df, cols, has_exact_aging_cols)
+                summary_text = build_data_summary(df, cols)
                 try:
                     st.session_state["ai_insights"] = generate_ai_insights(client, summary_text)
                 except genai.errors.APIError as e:
