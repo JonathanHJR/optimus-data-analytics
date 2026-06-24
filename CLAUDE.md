@@ -136,6 +136,83 @@ data appears to be from Safety Observations forms" unprompted.
   free tier may have different data-usage terms than a paid API key —
   re-check before ever pointing this at real data.
 
+## RabbitDeploy POC deployment (2026-06-24)
+Live POC URL: **https://o2-analytics-dashboard.cio.sandbox.gov.sg/**
+
+RabbitDeploy is GovTech CIO Office's internal sandbox PaaS, separate from
+the public Streamlit Cloud demo — see the "Guide: Direct Claude Path" the
+user pasted in-session for the full onboarding flow (TechPass login →
+`#ask-rabbit` Slack for workspace assignment → create project). Only
+reachable via a SEED/COMET device; the deployed app itself is a normal
+public-ish gov-network URL though.
+
+### Getting code in: ZIP upload, not git
+There's no GitHub-import option in the UI. Two paths exist: a Repository
+Token for `git push`, or **"Update Code" → upload a `.zip`**. We used the
+ZIP path specifically because the SEED laptop can't run Claude Code (not
+the user's device) and downloads are blocked there — so the workflow is:
+develop with Claude on the main machine → `git archive --format=zip -o
+out.zip HEAD` to export exactly the git-tracked files (auto-excludes
+`.git`, `__pycache__`, venv, real Excel data, secrets — all gitignored) →
+transfer just that one ZIP to the SEED laptop → upload via "Update Code".
+When file transfer itself was also blocked, the fallback was recreating
+each file by hand in VS Code via clipboard paste (text clipboard apparently
+isn't blocked, only file downloads) and zipping **locally on the SEED
+laptop** (Explorer → Send to → Compressed folder — no download involved).
+
+### Critical deployment gotcha: Procfile required for non-FastAPI/Flask apps
+Clicking "Deploy as POC" creates two Northflank services per product:
+- **`<project>-main`** — the actual app container
+- **`cf-<project>`** — a Cloudflare tunnel sidecar (`cloudflared`) that
+  gives the public `*.cio.sandbox.gov.sg` URL without opening inbound
+  firewall ports on Northflank. Public request → Cloudflare edge → this
+  tunnel → `-main`.
+
+RabbitDeploy's build script (visible in the Build Log) only **auto-detects
+FastAPI or Flask** — it greps `main.py`/`app.py`/etc. for `= FastAPI(` or
+`= Flask(` patterns, and if neither matches (as for any other framework,
+Streamlit included), it falls back to a hardcoded `exec uvicorn main:app
+--host 0.0.0.0 --port 3000`. That doesn't exist in a Streamlit project, so
+the container crash-loops forever (Server Log: `Could not import module
+"main"`, repeating every ~30s). From the browser this shows up as
+`upstream connect error... connection timeout` — the Cloudflare tunnel is
+working fine, it's just connecting to a container with nothing listening.
+
+**Fix: a `Procfile`** (exact filename, no extension) in the repo root —
+the build script checks for this *before* the FastAPI/Flask fallback, and
+uses its `web:` line verbatim if present:
+```
+web: streamlit run app.py --server.port 3000 --server.address 0.0.0.0 --server.headless true --server.enableCORS false --server.enableXsrfProtection false
+```
+Each flag matters: port `3000` + `0.0.0.0` matches the container's
+`EXPOSE 3000` (the ingress won't reach any other port/interface);
+`--server.headless true` skips Streamlit's interactive first-run "enter
+your email" prompt, which would otherwise hang forever in a
+non-interactive container (the exact issue hit locally earlier in this
+project, fixed there via a `credentials.toml` — headless mode is the
+container-appropriate equivalent); `--server.enableCORS/XsrfProtection
+false` is needed because Streamlit's default same-origin checks don't
+match the Cloudflare tunnel's external hostname.
+
+After adding the Procfile: re-zip, re-upload via "Update Code", then
+"Rebuild" the `-main` service. Confirmed working — Server Log showed a
+clean `Uvicorn server started on 0.0.0.0:3000` / `You can now view your
+Streamlit app in your browser.`
+
+### Database (not currently used)
+"Create Database" offers a **Neon-hosted PostgreSQL** instance (AWS
+Singapore, `ap-southeast-1`) with a dev connection string and Neon's
+branching/autoscaling. **Not provisioned** — this app is stateless
+(processes each upload in-memory per session), so there's nothing to
+persist yet. Revisit only if a real cross-session persistence need shows
+up (e.g. a history of past AI Insights).
+
+### Production deployment — separately gated
+The same project page has a "Deploy as Production" path (also Northflank,
+via "GovPaaS Prod"), but it's blocked behind a Security Clearance /
+"Production Ready Status" approval that has to be requested from CIOO —
+not pursued; still POC-stage only.
+
 ## Data governance — IMPORTANT
 Real Optimus/O2 records are **government data**. Before pointing this app at
 live exports, the following must be decided with whoever owns data governance:
