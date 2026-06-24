@@ -23,7 +23,11 @@ from google.genai import types as genai_types
 # calls start failing — free-tier model names/availability change over time.
 GEMINI_MODEL = "gemini-2.5-flash"
 
-st.set_page_config(page_title="Optimus Analytics", layout="wide")
+st.set_page_config(page_title="Optimus Analytics", page_icon="🏗️", layout="wide")
+
+# Matches .streamlit/config.toml's primaryColor, so bar/line charts read as
+# part of the same theme instead of Plotly's unrelated default palette.
+CHART_ACCENT_COLOR = "#0B5394"
 
 # ----------------------------------------------------------------------
 # Confirmed Optimus "Quality Defects Inspection Form" export schema.
@@ -142,7 +146,8 @@ def bar_of_counts(df, col, title, top_n=15):
     counts = df[col].value_counts(dropna=False).head(top_n).reset_index()
     counts.columns = [col, "Count"]
     fig = px.bar(
-        counts, x="Count", y=col, orientation="h", title=title, text="Count"
+        counts, x="Count", y=col, orientation="h", title=title, text="Count",
+        color_discrete_sequence=[CHART_ACCENT_COLOR],
     )
     fig.update_layout(yaxis={"categoryorder": "total ascending"}, height=400)
     return fig
@@ -320,6 +325,7 @@ with tab_pm:
             fig = px.histogram(
                 aging.dropna(subset=["Age (days)"]), x="Age (days)", nbins=20,
                 title="Aging distribution (raised → closed, or raised → now if open)",
+                color_discrete_sequence=[CHART_ACCENT_COLOR],
             )
             st.plotly_chart(fig, use_container_width=True)
             m1, m2 = st.columns(2)
@@ -332,7 +338,8 @@ with tab_pm:
         age_df = pd.DataFrame({"Age (days)": age_days.dropna()})
         if not age_df.empty:
             fig = px.histogram(age_df, x="Age (days)", nbins=20,
-                               title="Aging distribution (days since date)")
+                               title="Aging distribution (days since date)",
+                               color_discrete_sequence=[CHART_ACCENT_COLOR])
             st.plotly_chart(fig, use_container_width=True)
             st.metric("Median age (days)", int(age_df["Age (days)"].median()))
     else:
@@ -393,7 +400,8 @@ with tab_quality:
             counts["Count"].cumsum() / counts["Count"].sum() * 100
         )
         fig = px.line(counts, x=q_col, y="Cumulative %", markers=True,
-                      title="Pareto (cumulative %)")
+                      title="Pareto (cumulative %)",
+                      color_discrete_sequence=[CHART_ACCENT_COLOR])
         fig.add_hline(y=80, line_dash="dash", line_color="red")
         st.plotly_chart(fig, use_container_width=True)
     else:
