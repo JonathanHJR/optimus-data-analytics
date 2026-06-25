@@ -14,6 +14,7 @@ Run with:  streamlit run app.py
 
 import io
 import os
+import time
 import pandas as pd
 import streamlit as st
 import plotly.express as px
@@ -163,17 +164,35 @@ def build_data_summary(df: pd.DataFrame, cols: dict) -> str:
     return "\n".join(lines)
 
 
-def generate_ai_insights(client: genai.Client, summary_text: str) -> str:
-    response = client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=summary_text,
-        config=genai_types.GenerateContentConfig(
-            system_instruction=AI_SYSTEM_PROMPT,
-            max_output_tokens=1024,
-            thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
-        ),
-    )
-    return response.text
+def generate_ai_insights(client: genai.Client, summary_text: str, max_attempts: int = 3) -> str:
+    """Calls Gemini with retry-with-backoff for transient server overload —
+    free-tier calls can return 503 UNAVAILABLE under demand spikes (observed
+    in practice). Only retries ServerError (5xx); a ClientError (4xx, e.g.
+    bad request/auth) won't be fixed by retrying, so it's raised immediately."""
+    last_error = None
+    for attempt in range(max_attempts):
+        try:
+            response = client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=summary_text,
+                config=genai_types.GenerateContentConfig(
+                    system_instruction=AI_SYSTEM_PROMPT,
+                    max_output_tokens=1024,
+                    thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
+                ),
+            )
+            if response.text:
+                return response.text
+            return (
+                "_Gemini returned an empty response — this can happen if the "
+                "data summary is unusually large. Try regenerating, or check "
+                "the Raw Data tab for the underlying numbers._"
+            )
+        except genai.errors.ServerError as e:
+            last_error = e
+            if attempt < max_attempts - 1:
+                time.sleep(2 ** (attempt + 1))  # 2s, 4s
+    raise last_error
 
 
 # ----------------------------------------------------------------------
@@ -220,8 +239,19 @@ if df.empty:
 df.columns = [str(c).strip() for c in df.columns]
 cols = guess_columns(df)
 
+# AI Insights is tied to whatever file was last analysed — clear it on a new
+# upload so a stale analysis from a previous file never lingers on screen.
+upload_identity = (uploaded.name, uploaded.size)
+if st.session_state.get("upload_identity") != upload_identity:
+    st.session_state.pop("ai_insights", None)
+    st.session_state["upload_identity"] = upload_identity
+
 st.title("Optimus Data Analytics Dashboard")
 kpi_row(df, cols)
+if cols["date"]:
+    primary_date = pd.to_datetime(df[cols["date"][0]], errors="coerce", dayfirst=True).dropna()
+    if not primary_date.empty:
+        st.caption(f"Date range ({cols['date'][0]}): {primary_date.min().date()} to {primary_date.max().date()}")
 
 # Optional global filter on the first detected category column
 if cols["category"]:
