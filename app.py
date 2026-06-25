@@ -15,6 +15,7 @@ Run with:  streamlit run app.py
 import io
 import os
 import time
+from pathlib import Path
 import pandas as pd
 import streamlit as st
 import plotly.express as px
@@ -25,7 +26,15 @@ from google.genai import types as genai_types
 # calls start failing — free-tier model names/availability change over time.
 GEMINI_MODEL = "gemini-2.5-flash"
 
-st.set_page_config(page_title="Optimus Analytics", page_icon="🏗️", layout="wide")
+# A real image file, not an emoji — emoji page icons are rendered client-side
+# from raw SVG <text> with no font specified, so they look inconsistent
+# across browsers/OSes (confirmed by reading Streamlit's frontend source).
+# This bitmap renders identically everywhere.
+st.set_page_config(
+    page_title="Optimus Analytics",
+    page_icon=str(Path(__file__).parent / "favicon.png"),
+    layout="wide",
+)
 
 # Matches .streamlit/config.toml's primaryColor, so charts read as part of
 # the same theme instead of Plotly's unrelated default palette.
