@@ -136,6 +136,86 @@ data appears to be from Safety Observations forms" unprompted.
   free tier may have different data-usage terms than a paid API key —
   re-check before ever pointing this at real data.
 
+## Deployment overview — three platforms coexist (2026-07-01)
+All three hosting targets are live simultaneously. No conflicts — each uses its
+own entry-point file and they share the same `app.py` / `requirements.txt`:
+
+| Platform | Entry point | Gemini key source | Status |
+|---|---|---|---|
+| Streamlit Community Cloud | auto-detected `app.py` | `.streamlit/secrets.toml` via SCC Secrets UI | Live |
+| RabbitDeploy | `Procfile` | Not configured (AI tab shows setup hint) | Live POC |
+| Airbase (GCC) | `Dockerfile` + `airbase.json` | `.env` file, injected by Airbase CLI at runtime | Live POC |
+
+Do **not** remove any of these files — they serve different platforms.
+
+## Airbase deployment (2026-07-01)
+Airbase is GovTech's self-serve GCC-hosted PaaS (Pilot stage). It is
+Docker-based and CLI-driven — no GitHub import, no web UI deploy button.
+Separate from RabbitDeploy and Streamlit Community Cloud.
+
+Live URL (requires TechPass / accessible on normal browser):
+**https://o2-data-analytics.fbi-dbe.airbases.gov.sg/** *(confirm current URL
+in the Airbase console Environments tab — handle is `fbi-dbe/o2-data-analytics`)*
+
+### CLI workflow
+```bash
+airbase login          # opens browser TechPass SSO
+airbase deploy --yes   # builds Docker image locally, pushes to Airbase registry, deploys
+```
+Airbase CLI is installed at `C:\Users\jingr\AppData\Local\Airbase\CLI\airbase.exe`.
+If `airbase` isn't found in a terminal, open a **new** terminal window after
+install (PATH update only applies to terminals opened after the installer ran).
+
+### Key files
+- **`Dockerfile`** — uses `gdssingapore/airbase:python-3.13` (GDS-hardened base
+  image, mandatory for CSP compliance on GCC). Runs as non-root `USER app`
+  (GCC security requirement). Port `${PORT:-3000}` (Airbase injects `$PORT`
+  at runtime; default 3000 matches `airbase.json`).
+- **`airbase.json`** — `framework: "container"`, `handle: "fbi-dbe/o2-data-analytics"`,
+  `port: 3000`. No env var support in this file.
+- **`.env`** — gitignored, not in `.dockerignore`. Airbase CLI reads this at
+  deploy time and injects values as runtime environment variables. Currently
+  contains `GEMINI_API_KEY`. **Never hardcode secrets in Dockerfile ENV
+  directives** (Airbase docs explicitly prohibit this).
+
+### Critical gotchas encountered
+**Docker image caching**: `airbase deploy` reuses an existing local Docker image
+with the same tag even if the Dockerfile changed. If changes aren't taking
+effect, delete the cached image first:
+```bash
+docker rmi local.airbase.sg/o2-data-analytics:<image-id>
+# then redeploy
+airbase deploy --yes
+```
+Find the `<image-id>` in Docker Desktop or `docker images`.
+
+**Port mismatch → 502**: `airbase.json` says port 3000 but if the cached image
+still runs on the old port (e.g. 8501), Airbase's Kong gateway gets a 502.
+Fix: delete cached image, force fresh build.
+
+**`gatherUsageStats = false` required**: Streamlit's metrics utility tries to
+write a machine-ID file to a restricted path in the container on first start,
+causing a startup error. Fixed by `.streamlit/config.toml` setting
+`gatherUsageStats = false`. Without this, the container may appear to crash
+before the app comes up.
+
+**CSP warning (non-blocking)**: The browser console shows a CSP violation for
+Streamlit's built-in inline script `window.prerenderReady = false` in its
+`index.html`. This is Streamlit's own code, not ours. Airbase's own
+documentation states "Streamlit generally works fine with CSP" — this warning
+does not break any app functionality (file upload, charts, AI Insights all
+work). No fix needed; it's an accepted known limitation.
+
+**`gdssingapore/airbase:python-3.13` is mandatory** (not `python:3.11-slim` or
+similar). The standard Python Docker images are not GCC-hardened and produce
+real CSP violations that do break the app. The GDS base image resolves this.
+
+### `.streamlit/config.toml` — required settings
+```toml
+[browser]
+gatherUsageStats = false   # prevents container startup error (restricted filesystem)
+```
+
 ## RabbitDeploy POC deployment (2026-06-24)
 Live POC URL: **https://o2-analytics-dashboard.cio.sandbox.gov.sg/**
 

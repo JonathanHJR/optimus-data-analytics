@@ -14,3 +14,6 @@ venv/
 
 # Claude Code local settings
 .claude/settings.local.json
+
+# Local environment variables (API keys — never commit)
+.env
