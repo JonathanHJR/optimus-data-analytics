@@ -1,0 +1,59 @@
+include:
+  - project: innersource/sgts/runtime/airbase/airbase-pipeline
+    ref: v1
+    file: baseline.gitlab-ci.yml
+
+review:
+  extends: .airbase-deploy
+  stage: test
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  variables:
+    AIRBASE_ENVIRONMENT: $CI_COMMIT_REF_SLUG
+  environment:
+    name: review/$AIRBASE_ENVIRONMENT
+    deployment_tier: testing
+    url: $DYNAMIC_ENVIRONMENT_URL
+    on_stop: stop_review
+    auto_stop_in: 1 day
+
+stop_review:
+  extends: .airbase-destroy
+  stage: test
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  needs:
+    - review
+  variables:
+    AIRBASE_ENVIRONMENT: $CI_COMMIT_REF_SLUG
+  environment:
+    name: review/$AIRBASE_ENVIRONMENT
+    deployment_tier: testing
+    action: stop
+
+production:
+  extends: .airbase-deploy
+  stage: deploy
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  variables:
+    AIRBASE_ENVIRONMENT: default
+  environment:
+    name: production
+    deployment_tier: staging
+    url: $DYNAMIC_ENVIRONMENT_URL
+    on_stop: stop_production
+
+stop_production:
+  extends: .airbase-destroy
+  stage: deploy
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  needs:
+    - production
+  variables:
+    AIRBASE_ENVIRONMENT: default
+  environment:
+    name: production
+    deployment_tier: staging
+    action: stop
