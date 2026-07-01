@@ -1,0 +1,5 @@
+{
+  "framework": "container",
+  "handle": "fbi-dbe/o2-data-analytics",
+  "port": 8080
+}
