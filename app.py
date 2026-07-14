@@ -109,9 +109,9 @@ def bar_of_counts(df, col, title, top_n=15):
 
 def kpi_row(df, cols):
     c1, c2, c3 = st.columns(3)
-    c1.metric("Total records", len(df))
-    c2.metric("Columns", df.shape[1])
-    c3.metric("Date fields detected", len(cols["date"]))
+    c1.metric("Total records", len(df), border=True)
+    c2.metric("Columns", df.shape[1], border=True)
+    c3.metric("Date fields detected", len(cols["date"]), border=True)
 
 
 AI_SYSTEM_PROMPT = """You are an analyst reviewing data exported from \
@@ -424,16 +424,18 @@ with tab_overview:
         "see the AI Insights tab."
     )
     if cols["status"]:
-        st.plotly_chart(
-            bar_of_counts(df, cols["status"][0], f"Records by {cols['status'][0]}"),
-            use_container_width=True,
-        )
+        with st.container(border=True):
+            st.plotly_chart(
+                bar_of_counts(df, cols["status"][0], f"Records by {cols['status'][0]}"),
+                width="stretch",
+            )
     if cols["category"]:
         for cat_col in cols["category"][:5]:
-            st.plotly_chart(
-                bar_of_counts(df, cat_col, f"Counts by {cat_col}"),
-                use_container_width=True,
-            )
+            with st.container(border=True):
+                st.plotly_chart(
+                    bar_of_counts(df, cat_col, f"Counts by {cat_col}"),
+                    width="stretch",
+                )
     if not cols["status"] and not cols["category"]:
         st.caption("No status or categorical columns detected for an overview.")
 
@@ -565,13 +567,14 @@ with tab_classify:
                 st.caption(
                     "Categories Gemini proposed: " + ", ".join(classification["categories"])
                 )
-                st.plotly_chart(
-                    bar_of_counts(
-                        labeled_df, "AI Category",
-                        f"AI-classified categories for '{target_col}'",
-                    ),
-                    use_container_width=True,
-                )
+                with st.container(border=True):
+                    st.plotly_chart(
+                        bar_of_counts(
+                            labeled_df, "AI Category",
+                            f"AI-classified categories for '{target_col}'",
+                        ),
+                        width="stretch",
+                    )
                 st.download_button(
                     "Download classified data (CSV)",
                     labeled_df.to_csv(index=False).encode("utf-8"),
@@ -584,7 +587,7 @@ with tab_raw:
     st.subheader("Raw Data")
     with st.expander("Detected column types"):
         st.json(cols)
-    st.dataframe(df, use_container_width=True)
+    st.dataframe(df, width="stretch")
     st.download_button(
         "Download filtered data (CSV)",
         df.to_csv(index=False).encode("utf-8"),
