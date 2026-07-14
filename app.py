@@ -13,6 +13,7 @@ Run with:  streamlit run app.py
 """
 
 import io
+import json
 import os
 import time
 from pathlib import Path
@@ -176,8 +177,13 @@ def build_data_summary(df: pd.DataFrame, cols: dict) -> str:
 def generate_ai_insights(client: genai.Client, summary_text: str, max_attempts: int = 3) -> str:
     """Calls Gemini with retry-with-backoff for transient server overload —
     free-tier calls can return 503 UNAVAILABLE under demand spikes (observed
-    in practice). Only retries ServerError (5xx); a ClientError (4xx, e.g.
-    bad request/auth) won't be fixed by retrying, so it's raised immediately."""
+    in practice), or 429 RESOURCE_EXHAUSTED if a burst of calls trips the
+    free-tier rate limit (also observed in practice, once the classification
+    feature below started firing several batched calls in quick succession).
+    A 429 gets a longer backoff than a 5xx, since rate-limit windows take
+    longer to clear than transient overload. Any other ClientError (4xx,
+    e.g. bad request/auth) won't be fixed by retrying, so it's raised
+    immediately."""
     last_error = None
     for attempt in range(max_attempts):
         try:
@@ -187,6 +193,7 @@ def generate_ai_insights(client: genai.Client, summary_text: str, max_attempts: 
                 config=genai_types.GenerateContentConfig(
                     system_instruction=AI_SYSTEM_PROMPT,
                     max_output_tokens=1024,
+                    temperature=1.0,  # written analysis benefits from varied phrasing
                     thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
                 ),
             )
@@ -201,7 +208,112 @@ def generate_ai_insights(client: genai.Client, summary_text: str, max_attempts: 
             last_error = e
             if attempt < max_attempts - 1:
                 time.sleep(2 ** (attempt + 1))  # 2s, 4s
+        except genai.errors.ClientError as e:
+            if e.code == 429 and attempt < max_attempts - 1:
+                last_error = e
+                time.sleep(15 * (attempt + 1))  # 15s, 30s
+                continue
+            raise
     raise last_error
+
+
+def _call_gemini_json(client: genai.Client, prompt: str, max_output_tokens: int, max_attempts: int = 5):
+    """Shared helper for the classification calls below: same
+    retry-with-backoff behaviour as generate_ai_insights (including the
+    429-specific longer backoff), but expecting a JSON response instead of
+    markdown prose. Classification fires several batched calls back-to-back
+    for one column, which is exactly the pattern that tripped the free-tier
+    rate limit in testing — hence more attempts here than the single-call
+    AI Insights tab."""
+    last_error = None
+    for attempt in range(max_attempts):
+        try:
+            response = client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=prompt,
+                config=genai_types.GenerateContentConfig(
+                    max_output_tokens=max_output_tokens,
+                    response_mime_type="application/json",
+                    temperature=0.0,  # classification should be deterministic, not creative
+                    thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
+                ),
+            )
+            return json.loads(response.text)
+        except genai.errors.ServerError as e:
+            last_error = e
+            if attempt < max_attempts - 1:
+                time.sleep(2 ** (attempt + 1))
+        except genai.errors.ClientError as e:
+            if e.code == 429 and attempt < max_attempts - 1:
+                last_error = e
+                time.sleep(15 * (attempt + 1))  # 15s, 30s, 45s, 60s
+                continue
+            raise
+    raise last_error
+
+
+def induce_taxonomy(client: genai.Client, samples: list[str], max_categories: int = 8) -> list[str]:
+    """Propose a short, fixed set of categories from a sample of free-text
+    values — induced from the data itself rather than a hardcoded list, so
+    this works the same for any Optimus form's free-text field. A fixed
+    taxonomy (used by every batch in classify_column below) keeps labels
+    consistent across the whole column, instead of each batch inventing
+    its own wording for the same underlying category."""
+    prompt = (
+        f"Here are {len(samples)} free-text entries from a JTC Optimus "
+        "project export:\n\n" + "\n".join(f"- {s}" for s in samples) +
+        f"\n\nPropose a fixed list of at most {max_categories} short category "
+        "labels (2-4 words each) that would sensibly classify entries like "
+        "these. Respond as a JSON array of strings only."
+    )
+    categories = _call_gemini_json(client, prompt, max_output_tokens=256)
+    labels = [str(c) for c in categories][:max_categories]
+    if "Other" not in labels:
+        labels.append("Other")
+    return labels
+
+
+def classify_batch(client: genai.Client, texts: list[str], categories: list[str]) -> list[str]:
+    """Classify a batch of free-text entries into one of `categories`.
+    Returns one label per input text, same order/length as `texts`."""
+    numbered = "\n".join(f"{i}: {t}" for i, t in enumerate(texts))
+    prompt = (
+        f"Categories: {', '.join(categories)}\n\n"
+        "Classify each numbered entry below into exactly one of the "
+        "categories above (use 'Other' if none fit).\n\n"
+        f"{numbered}\n\n"
+        'Respond as a JSON array of {"index": <int>, "category": <string>} '
+        "objects, one per entry, in any order."
+    )
+    results = _call_gemini_json(client, prompt, max_output_tokens=2048)
+    labels = ["Other"] * len(texts)
+    for item in results:
+        idx = item.get("index")
+        if isinstance(idx, int) and 0 <= idx < len(texts):
+            labels[idx] = str(item.get("category", "Other"))
+    return labels
+
+
+def classify_all(client: genai.Client, values: list[str], categories: list[str], batch_size: int = 25, progress_callback=None) -> list[str]:
+    """Classify every value into one of `categories` — a taxonomy already
+    decided (via induce_taxonomy, plus optional human review/editing in the
+    UI) rather than induced fresh here, so the same reviewed category list
+    is used consistently across every batch. Batches multiple rows per API
+    call rather than one call per row, matching the app's existing
+    free-tier cost-consciousness."""
+    batches = [values[i:i + batch_size] for i in range(0, len(values), batch_size)]
+    all_labels: list[str] = []
+    for i, batch in enumerate(batches):
+        all_labels.extend(classify_batch(client, batch, categories))
+        if progress_callback:
+            progress_callback((i + 1) / len(batches))
+        # Small pause between batches to avoid tripping the free-tier rate
+        # limit in the first place (observed in testing: firing several
+        # batches back-to-back hit a 429), rather than only reacting to it
+        # via _call_gemini_json's retry-with-backoff after the fact.
+        if i < len(batches) - 1:
+            time.sleep(3)
+    return all_labels
 
 
 # ----------------------------------------------------------------------
@@ -253,6 +365,8 @@ cols = guess_columns(df)
 upload_identity = (uploaded.name, uploaded.size)
 if st.session_state.get("upload_identity") != upload_identity:
     st.session_state.pop("ai_insights", None)
+    st.session_state.pop("taxonomy", None)
+    st.session_state.pop("classification", None)
     st.session_state["upload_identity"] = upload_identity
 
 st.title("Optimus Data Analytics Dashboard")
@@ -278,7 +392,9 @@ if cols["category"]:
 # ----------------------------------------------------------------------
 # Tabs
 # ----------------------------------------------------------------------
-tab_overview, tab_ai, tab_raw = st.tabs(["📊 Overview", "🤖 AI Insights", "🗂 Raw Data"])
+tab_overview, tab_ai, tab_classify, tab_raw = st.tabs(
+    ["📊 Overview", "🤖 AI Insights", "🏷️ AI Classification", "🗂 Raw Data"]
+)
 
 # ---- Overview: generic aggregate counts, no per-form business logic ----
 with tab_overview:
@@ -332,6 +448,106 @@ with tab_ai:
                 "ai_insights.md",
                 "text/markdown",
             )
+
+# ---- AI Classification: per-row categorisation of a free-text column ----
+# Distinct from AI Insights above: that tab summarises the data in prose.
+# This one generates new structured data (a category per row) that may not
+# exist anywhere in the original export — e.g. the Safety Observation form
+# has no defect-type/severity column at all, only free-text notes.
+with tab_classify:
+    st.subheader("AI Classification")
+    client = get_gemini_client()
+    if client is None:
+        st.info(
+            "No Gemini API key found. Add `GEMINI_API_KEY` to "
+            "`.streamlit/secrets.toml` locally, or under the app's "
+            "Settings -> Secrets on Streamlit Cloud, to enable this tab."
+        )
+    else:
+        # Same "genuine free text, not IDs/serials" heuristic already used
+        # for AI Insights sampling — average of 3+ words per value.
+        eligible_cols = [
+            col for col in cols["text"]
+            if not df[col].dropna().empty
+            and df[col].dropna().astype(str).str.split().str.len().mean() >= 3
+        ]
+        if not eligible_cols:
+            st.caption("No free-text columns detected to classify.")
+        else:
+            target_col = st.selectbox("Column to classify", eligible_cols)
+            st.caption(
+                "Step 1: Gemini proposes a short set of categories from a "
+                "sample of this column — no predefined list, so this works "
+                "for any Optimus form's free-text field. Review/edit them, "
+                "then run classification against the confirmed list."
+            )
+
+            if st.button("1. Propose categories"):
+                values = df[target_col].dropna().astype(str)
+                with st.spinner("Asking Gemini to propose categories..."):
+                    try:
+                        sample_size = min(30, len(values))
+                        sample = values.sample(sample_size, random_state=0).tolist()
+                        st.session_state["taxonomy"] = {
+                            "column": target_col,
+                            "categories": induce_taxonomy(client, sample),
+                        }
+                        # A fresh taxonomy invalidates any previous run's
+                        # classification, since labels were assigned against
+                        # the old category list.
+                        st.session_state.pop("classification", None)
+                    except (genai.errors.APIError, json.JSONDecodeError) as e:
+                        st.error(f"Category proposal failed: {e}")
+
+            taxonomy = st.session_state.get("taxonomy")
+            if taxonomy and taxonomy["column"] == target_col:
+                st.write("**Proposed categories** — edit below if needed, one per line:")
+                edited = st.text_area(
+                    "Categories", value="\n".join(taxonomy["categories"]),
+                    height=160, label_visibility="collapsed",
+                )
+                confirmed_categories = [c.strip() for c in edited.split("\n") if c.strip()]
+
+                if st.button("2. Run classification with these categories"):
+                    values = df[target_col].dropna().astype(str)
+                    progress = st.progress(0.0)
+                    with st.spinner("Classifying with Gemini..."):
+                        try:
+                            labels = classify_all(
+                                client, values.tolist(), confirmed_categories,
+                                progress_callback=progress.progress,
+                            )
+                            result = pd.Series("(no text)", index=df.index)
+                            result.loc[values.index] = labels
+                            st.session_state["classification"] = {
+                                "column": target_col,
+                                "labels": result,
+                                "categories": confirmed_categories,
+                            }
+                        except (genai.errors.APIError, json.JSONDecodeError) as e:
+                            st.error(f"AI classification failed: {e}")
+                    progress.empty()
+
+            classification = st.session_state.get("classification")
+            if classification and classification["column"] == target_col:
+                labeled_df = df.copy()
+                labeled_df["AI Category"] = classification["labels"]
+                st.caption(
+                    "Categories Gemini proposed: " + ", ".join(classification["categories"])
+                )
+                st.plotly_chart(
+                    bar_of_counts(
+                        labeled_df, "AI Category",
+                        f"AI-classified categories for '{target_col}'",
+                    ),
+                    use_container_width=True,
+                )
+                st.download_button(
+                    "Download classified data (CSV)",
+                    labeled_df.to_csv(index=False).encode("utf-8"),
+                    "optimus_classified.csv",
+                    "text/csv",
+                )
 
 # ---- Raw data + detected schema ----
 with tab_raw:

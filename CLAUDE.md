@@ -125,16 +125,82 @@ data appears to be from Safety Observations forms" unprompted.
   values per qualifying text column) to keep each call small and within
   free-tier limits.
 - **Reliability note**: free-tier Gemini calls can return `503 UNAVAILABLE`
-  under demand spikes (observed in practice) — currently surfaced as a
-  plain `st.error`, not auto-retried. Worth adding retry-with-backoff if
-  this becomes frequent.
-- **Governance reminder**: this was added on the explicit assumption that
-  only public/dummy data reaches this app (see Data governance below) — the
-  real exports' `Created by` / `Modified by` / observation-notes fields
-  contain real names and project specifics. Revisit whether an AI layer is
-  acceptable at all once real Optimus data is in scope, and note Gemini's
-  free tier may have different data-usage terms than a paid API key —
-  re-check before ever pointing this at real data.
+  under demand spikes (observed in practice). `generate_ai_insights()` now
+  retries with backoff (2s, 4s) on `ServerError`, and also on a 429
+  `RESOURCE_EXHAUSTED` `ClientError` specifically (longer backoff — 15s,
+  30s — since rate-limit windows take longer to clear than transient
+  overload; see the AI Classification section below, where this was
+  actually hit in testing).
+- **Governance update (2026-07-14)**: real Optimus/O2 data reaching the AI
+  layer has since been explicitly authorized — the AI Classification
+  feature below was tested against the real Safety Observation Form export.
+  The original caution here (only dummy data should reach Gemini) is no
+  longer the operating assumption; kept for history, not as a current
+  restriction.
+
+## AI Classification tab (2026-07-14)
+Added to close a real gap against the internship deliverable's wording
+("AI models to analyse and classify... automated categorisation of
+project documentation and information") — the AI Insights tab only
+*summarizes* the data in prose; nothing previously generated new
+structured data. The Safety Observation form is the clearest case: it has
+no defect-type/severity column at all, only free-text `Description of
+Observation` — the "🏷️ AI Classification" tab lets Gemini generate that
+categorisation, which doesn't exist anywhere in the original export.
+
+**Two-phase design, with a human checkpoint in between:**
+1. `induce_taxonomy()` — proposes a short, fixed category list (+ always
+   appends "Other") from a sample of the column, rather than hardcoding
+   categories, so this stays generic across any Optimus form's free-text
+   field (same "no per-form-type logic" philosophy as the rest of the app).
+2. The proposed categories are shown in an editable text area — the user
+   can review/edit before committing, rather than the app immediately
+   classifying everything against an unreviewed, possibly-off taxonomy.
+3. `classify_all()` / `classify_batch()` — classifies every row against
+   the *confirmed* list, batching ~25 rows per API call (fewer, larger
+   calls rather than one call per row) so every batch stays consistent
+   with the same fixed categories.
+
+**Zero-shot, not few-shot**: the classification prompt gives the category
+list and the texts to classify, but no labeled example classifications.
+Considered adding hand-written few-shot examples, but deferred — good
+examples should come from a human verifying real zero-shot output first,
+which didn't exist yet. Revisit once there's a corpus of spot-checked
+correct classifications to draw examples from.
+
+**Temperature**: classification calls (`_call_gemini_json`, shared by
+both phases above) use `temperature=0.0` — deterministic categorisation,
+not creative variation. `generate_ai_insights()` (AI Insights tab) keeps
+`temperature=1.0` — separate config per call, no shared/global setting.
+
+### Critical gotcha: hit a real 429 on first live test
+Testing against the real Safety Observation Form (141 rows, 6 batches of
+25 + 1 taxonomy call = 7 calls in quick succession) hit `429
+RESOURCE_EXHAUSTED` on the classification step — despite going in assuming
+usage was too low to matter. The existing retry-with-backoff only caught
+`ServerError` (5xx); a 429 comes through as `ClientError` (4xx) with
+`.code == 429`, so it wasn't retried at all and failed immediately.
+
+**Fix**: `_call_gemini_json` (and `generate_ai_insights`, for the same
+class of failure) now specifically catches `ClientError` with `code ==
+429` and retries with a longer backoff (15s, 30s, ...) than the 5xx case.
+`classify_all()` also adds a flat 3s pause between batches, to avoid
+tripping the limit in the first place rather than only reacting to it
+after the fact. After both fixes, a full 141-row run completed cleanly.
+
+**Lesson**: "we probably won't hit rate limits at this scale" was wrong in
+practice on the very first real test — worth verifying against the actual
+free-tier limits (check the current numbers at
+[ai.google.dev/gemini-api/docs/rate-limits](https://ai.google.dev/gemini-api/docs/rate-limits))
+rather than assuming, especially before pointing this at a larger real
+export than the 141-row sample.
+
+### Not yet done
+- Partial-failure resilience — if a batch fails after all retries are
+  exhausted, the whole run still raises and prior successful batches'
+  results are lost (not persisted incrementally).
+- Batch size (25) was picked for the 141-row sample; reconsider upward if
+  real exports are meaningfully larger, to cut down total call count.
 
 ## Deployment overview — three platforms coexist (2026-07-01)
 All three hosting targets are live simultaneously. No conflicts — each uses its
@@ -300,6 +366,18 @@ live exports, the following must be decided with whoever owns data governance:
 - **Whether any AI layer ever sees the data** (and if so, local-only e.g.
   Ollama vs. external endpoints).
 Building and testing against sample/dummy data has no such constraint.
+
+### Airbase app classification (2026-07-02)
+Airbase requires every app to be classified on two axes: security
+classification (Official Open/Closed/Restricted/Confidential+) and
+sensitivity level (Non-Sensitive/Sensitive Normal/Sensitive High). This
+deployment is classified **Official Open, Non-Sensitive** — appropriate
+while only dummy/sample data is uploaded. **Must be re-assessed** (with
+whoever owns data governance, per above) before real Optimus exports are
+ever uploaded here — real records containing `Created by`/`Modified by`/
+observation-notes fields with actual names would very likely push this to
+a higher classification, which may in turn affect whether Airbase (max
+supported: Restricted / Sensitive Normal) remains a valid hosting choice.
 
 ## Tech stack
 - **Streamlit** — app framework / UI
