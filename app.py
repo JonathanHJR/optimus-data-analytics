@@ -95,27 +95,6 @@ def guess_columns(df: pd.DataFrame) -> dict[str, list[str]]:
     }
 
 
-def style_by_distinct_value(df: pd.DataFrame, col: str):
-    """Colour-code a column's cells by distinct value for visual
-    scannability in the Raw Data table — a consistent colour per unique
-    value, cycling through a small palette, not a semantic judgement about
-    which values are "good"/"closed"/"done". Deliberately generic: hardcoding
-    which words mean "approved" or "terminal" doesn't hold up across Optimus
-    form types (this is the same reasoning that got the old
-    CLOSED_WORKFLOW_KEYWORDS constant removed — see the architecture
-    decision note in CLAUDE.md). Uses pandas' own Styler API, which
-    st.dataframe supports natively — no custom CSS."""
-    palette = ["#DCE9F7", "#DCEDE3", "#FBE8DC", "#EDE3F5", "#F7DCE4", "#E7E7E7"]
-    unique_vals = df[col].dropna().unique()
-    color_map = {val: palette[i % len(palette)] for i, val in enumerate(unique_vals)}
-
-    def highlight(val):
-        color = color_map.get(val)
-        return f"background-color: {color}" if color else ""
-
-    return df.style.map(highlight, subset=[col])
-
-
 def bar_of_counts(df, col, title, top_n=15):
     """Horizontal bar chart of value counts for a categorical column."""
     counts = df[col].value_counts(dropna=False).head(top_n).reset_index()
@@ -608,10 +587,7 @@ with tab_raw:
     st.subheader("Raw Data")
     with st.expander("Detected column types"):
         st.json(cols)
-    if cols["status"]:
-        st.dataframe(style_by_distinct_value(df, cols["status"][0]), width="stretch")
-    else:
-        st.dataframe(df, width="stretch")
+    st.dataframe(df, width="stretch")
     st.download_button(
         "Download filtered data (CSV)",
         df.to_csv(index=False).encode("utf-8"),
