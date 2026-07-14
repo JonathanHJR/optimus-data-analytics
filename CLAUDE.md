@@ -201,6 +201,132 @@ export than the 141-row sample.
   results are lost (not persisted incrementally).
 - Batch size (25) was picked for the 141-row sample; reconsider upward if
   real exports are meaningfully larger, to cut down total call count.
+- Few-shot examples (see above) — deferred until a corpus of verified
+  classifications exists.
+
+### AI Insights ↔ Classification enrichment (2026-07-14)
+The two tabs are otherwise fully independent (separate session-state keys,
+separate helper functions — `build_data_summary()` never calls the
+classification functions or vice versa), deliberately: Classification is
+several batched API calls plus a human review step, Insights is one cheap
+call, and forcing the former as a prerequisite for the latter would punish
+anyone who just wants a quick summary. But `build_data_summary(df, cols,
+classification=None)` now accepts the Classification tab's result as an
+optional argument — if the user already ran Classification this session,
+its category counts get folded into the Insights summary (e.g. "42% of
+observations were Housekeeping issues"), which the raw export alone often
+can't say. Purely additive/optional, not a hard dependency either way.
+
+## Upload 403 on files with embedded images — UNRESOLVED (2026-07-14)
+The Quality Defects Inspection Form fails to upload (on Airbase staging)
+with `AxiosError: Request failed with status code 403` on
+`/_stcore/upload_file/...`; the Safety Observation Form uploads fine.
+
+**Root cause narrowed down, not fixed**: reproduced independently via a
+headless browser, confirmed the 403 response body is a raw nginx-style
+"padding" error page (`<!-- a padding to disable MSIE and Chrome friendly
+error page -->`), not anything Streamlit itself generates — meaning this
+is blocked at a gateway/WAF layer in front of the app, before Streamlit
+ever sees the request. Ruled out both more-obvious causes: scanned every
+cell value in the Quality file for script tags/SQL keywords/path traversal
+etc. (zero hits, all short plain text), and confirmed file size is
+near-identical between the two forms (22KB vs 19KB). The one concrete
+structural difference found: the **Quality Defects file contains 5
+embedded JPEG images** (`xl/media/image*.jpeg` + a `drawing1.xml`/VML
+structure) that the Safety file has none of — a very plausible WAF
+trigger (embedded binary media in an uploaded Office document is a known
+flagged pattern), but this is inferred from correlation, not confirmed
+against actual Airbase/WAF logs (no access to those).
+
+**This is a platform-level policy, not an app bug** — not fixable in
+`app.py` or the Dockerfile. Considered and rejected disabling Streamlit's
+XSRF/CORS protection (`--server.enableXsrfProtection=false
+--server.enableCORS=false`) as a fix, since (a) it's a real security
+tradeoff the user hadn't authorized, and (b) it wouldn't have helped
+anyway — confirmed via reproduction that the block happens before
+Streamlit's own code runs, so Streamlit-level config can't touch it.
+
+**Next step, not yet done**: raise with Airbase support/admin, armed with
+the embedded-images correlation as a concrete lead — public Airbase docs
+don't mention any WAF/upload-content-scanning policy at all, so this can't
+be resolved from documentation alone.
+
+## Visual polish via native Streamlit theming (2026-07-14)
+Explicit constraint: no CSS injection, no `unsafe_allow_html`, no
+unofficial hacks — only documented `.streamlit/config.toml` theme keys and
+Streamlit's own layout primitives. This Streamlit version (1.58) has a much
+richer native theme surface than commonly assumed — worth checking
+`config.py`'s `_create_theme_options` calls directly for the full current
+list rather than assuming only the ~5 basic keys exist.
+
+**Used**: `font`/`headingFont` (loads a real Google Font via the
+`"Name:https://fonts.googleapis.com/..."` URL syntax — no self-hosting
+needed), `baseRadius`/`showSidebarBorder` for consistent rounding and a
+clean sidebar divide, a distinct `[theme.sidebar]` background,
+`metricValueFontWeight`, `dataframeHeaderBackgroundColor`,
+`chartCategoricalColors`. `st.metric(..., border=True)` and
+`st.container(border=True)` give native bordered "card" styling with zero
+CSS. Also replaced the deprecated `use_container_width=True` with
+`width="stretch"` throughout while touching this code.
+
+**Tried and reverted**: colour-coding the Raw Data table's status column
+by distinct value via pandas' `Styler` API (`df.style.map(...)`, which
+`st.dataframe` supports natively). Worked correctly — verified visually
+after learning the dataframe grid is canvas-rendered and paints
+asynchronously, so a screenshot taken immediately after switching tabs can
+look empty even when it's actually fine — but the user felt it didn't add
+enough visually and asked to revert. Reverted via `git revert` (not reset)
+to keep history; the commit before it (`cb13c82`) is the clean fallback
+point if this or a similar idea comes up again.
+
+## Planned: database integration (Neon Postgres) — not yet built (2026-07-14)
+Motivation: scale from "analyse one uploaded file per session, nothing
+persisted" to a real system — a database of JTC construction/design-phase
+projects, each with multiple data files uploaded over time, with
+classification/insights results persisted instead of recomputed every
+session. Files will be added manually (curated from Optimus exports,
+which have no API access — see "What this is" above), not via an automated
+pipeline; that manual step isn't going away, only what happens after it.
+
+**Provider decided**: Neon (serverless Postgres) — same service
+RabbitDeploy already offers (AWS `ap-southeast-1`), but provisioned
+directly/independently rather than through RabbitDeploy. Airbase itself
+still has no managed database (unchanged) — this uses the same
+bring-your-own-DB pattern already established for secrets: a
+`DATABASE_URL` in `.env`/`.env.staging`, same as `GEMINI_API_KEY`.
+
+**Schema direction decided, not yet implemented** — a hybrid relational +
+JSONB model, not a fully normalized one:
+```
+Projects(id, name, description, created_at)
+Files(id, project_id FK, form_type, filename, detected_columns JSONB, uploaded_at)
+Records(id, file_id FK, row_index, data JSONB)   -- one row per original spreadsheet row
+Analyses(id, file_id FK, type, result JSONB/TEXT, created_at)
+```
+`Projects`/`Files` are normal typed columns since they have a genuinely
+stable shape. `Records.data` is JSONB specifically because Optimus forms
+have completely different, unrelated column sets (Quality Defects: 28
+columns incl. trade-specific pairs; Safety Observation: 8; Contract
+Cashflow: unconfirmed) — a fully normalized table-per-form-type schema
+would force a migration every time a new form type appears, reintroducing
+at the database layer the exact per-form hardcoding problem the app's code
+already deliberately moved away from once (see "Architecture decision"
+above). `detected_columns` caches `guess_columns()`'s output per file so
+it doesn't need recomputing.
+
+**Rejected alternatives**: classic EAV (entity-attribute-value, one row
+per cell) — even more flexible than JSONB but notoriously bad for
+query/join performance, JSONB is the modern equivalent without that
+downside. A NoSQL document DB instead of Postgres — no real gain given
+Neon/Postgres is already the chosen provider, and would lose clean
+relational structure for `Projects`/`Files` that don't need flexibility.
+
+**Not yet checked**: whether Airbase's GCC network egress actually allows
+outbound Postgres connections at all — confirmed outbound HTTPS works
+(Gemini calls succeed live), but Postgres typically uses a different port,
+and GCC environments have shown tighter controls elsewhere (CSP
+enforcement, mandatory hardened base images). Cheap to verify once Neon
+exists, before building real features around it.
 
 ## Deployment overview — three platforms coexist (2026-07-01)
 All three hosting targets are live simultaneously. No conflicts — each uses its
