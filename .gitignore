@@ -17,3 +17,4 @@ venv/
 
 # Local environment variables (API keys — never commit)
 .env
+.env.*

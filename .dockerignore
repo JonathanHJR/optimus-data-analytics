@@ -8,3 +8,4 @@ Safety Observation Forms/
 *.xlsx
 *.xls
 .env
+.env.*
