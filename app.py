@@ -54,6 +54,23 @@ def load_excel(file_bytes: bytes) -> dict[str, pd.DataFrame]:
     return {name: xls.parse(name) for name in xls.sheet_names}
 
 
+# Streamlit reruns the whole script on every interaction anywhere on the
+# page — without caching, every single click would re-fire a network round
+# trip to Neon, which also scales to zero when idle (a real cold-start
+# delay on top of the network hop). Cached with a short TTL so the project/
+# file lists still pick up changes reasonably quickly; explicitly cleared
+# right after create_project/save_file below so a just-created project or
+# file shows up immediately rather than waiting out the TTL.
+@st.cache_data(ttl=30)
+def cached_list_projects():
+    return db.list_projects()
+
+
+@st.cache_data(ttl=30)
+def cached_list_files(project_id: int):
+    return db.list_files(project_id)
+
+
 def guess_columns(df: pd.DataFrame) -> dict[str, list[str]]:
     """Heuristically classify columns by shape alone (name + dtype +
     cardinality) — no knowledge of any specific Optimus form's schema, so
@@ -346,7 +363,7 @@ st.sidebar.title("Optimus Analytics")
 # (e.g. local dev without .env set up) hides the project/save UI instead of
 # crashing the app; upload-and-analyse-only still works exactly as before.
 try:
-    projects = db.list_projects()
+    projects = cached_list_projects()
     db_available = True
 except Exception:
     projects = []
@@ -378,6 +395,7 @@ if db_available:
             new_desc = st.text_input("Description (optional)")
             if st.button("Create project") and new_name.strip():
                 db.create_project(new_name.strip(), new_desc.strip())
+                cached_list_projects.clear()
                 st.session_state["project_choice"] = new_name.strip()
                 st.rerun()
         elif choice != "(none)":
@@ -392,7 +410,7 @@ if uploaded is not None:
 loaded_file_info = st.session_state.get("loaded_file")
 
 if db_available and selected_project_id:
-    saved_files = db.list_files(selected_project_id)
+    saved_files = cached_list_files(selected_project_id)
     if saved_files:
         with st.sidebar.expander("📂 Load a saved file"):
             file_options = {
@@ -479,6 +497,7 @@ if db_available and selected_project_id and data_identity[0] == "upload" and "db
         form_type = st.text_input("Form type / label", value=Path(filename).stem)
         if st.button("Save this file to the selected project"):
             file_id = db.save_file(selected_project_id, form_type, filename, cols, df)
+            cached_list_files.clear()
             st.session_state["db_file_id"] = file_id
             st.success(f"Saved to database (file id {file_id}).")
 
