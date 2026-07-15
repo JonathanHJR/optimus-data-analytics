@@ -239,12 +239,18 @@ flagged pattern), but this is inferred from correlation, not confirmed
 against actual Airbase/WAF logs (no access to those).
 
 **This is a platform-level policy, not an app bug** — not fixable in
-`app.py` or the Dockerfile. Considered and rejected disabling Streamlit's
-XSRF/CORS protection (`--server.enableXsrfProtection=false
---server.enableCORS=false`) as a fix, since (a) it's a real security
-tradeoff the user hadn't authorized, and (b) it wouldn't have helped
-anyway — confirmed via reproduction that the block happens before
-Streamlit's own code runs, so Streamlit-level config can't touch it.
+`app.py` or the Dockerfile. Considered disabling Streamlit's XSRF/CORS
+protection (`enableXsrfProtection`/`enableCORS = false` in
+`.streamlit/config.toml`) as a fix — flagged it as a real security
+tradeoff needing explicit authorization, which the user then gave
+specifically to test it empirically. **Tested on 2026-07-15, confirmed
+it does not fix this**: identical raw 403, byte-for-byte the same
+nginx-style error page, before and after disabling both settings.
+Reverted immediately (`git revert`-style, plain edit back to no `[server]`
+section) — confirmed the Safety Observation form still uploads correctly
+post-revert. This empirically confirms the earlier reasoning: the block
+happens before Streamlit's own code runs, so no Streamlit-level config
+change can touch it, regardless of which specific setting is tried.
 
 **Next step, not yet done**: raise with Airbase support/admin, armed with
 the embedded-images correlation as a concrete lead — public Airbase docs
