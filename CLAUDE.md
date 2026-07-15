@@ -279,32 +279,56 @@ enough visually and asked to revert. Reverted via `git revert` (not reset)
 to keep history; the commit before it (`cb13c82`) is the clean fallback
 point if this or a similar idea comes up again.
 
-## Planned: database integration (Neon Postgres) — not yet built (2026-07-14)
+## Database integration (Neon Postgres) — schema built and tested, not yet wired into the UI (2026-07-14/15)
 Motivation: scale from "analyse one uploaded file per session, nothing
 persisted" to a real system — a database of JTC construction/design-phase
 projects, each with multiple data files uploaded over time, with
 classification/insights results persisted instead of recomputed every
-session. Files will be added manually (curated from Optimus exports,
-which have no API access — see "What this is" above), not via an automated
-pipeline; that manual step isn't going away, only what happens after it.
+session. Files are added manually (curated from Optimus exports, which
+have no API access — see "What this is" above, and see the "Optimus API
+feasibility" investigation below); that manual step isn't going away,
+only what happens after it.
 
-**Provider decided**: Neon (serverless Postgres) — same service
-RabbitDeploy already offers (AWS `ap-southeast-1`), but provisioned
-directly/independently rather than through RabbitDeploy. Airbase itself
-still has no managed database (unchanged) — this uses the same
-bring-your-own-DB pattern already established for secrets: a
-`DATABASE_URL` in `.env`/`.env.staging`, same as `GEMINI_API_KEY`.
+**Governance note — dummy data only so far**: everything built and tested
+below used purely synthetic test data (fake project/rows), not real
+Optimus exports. Persisting real project data across all JTC
+projects/files is a materially bigger governance commitment than the
+earlier one-file/one-AI-call authorization already granted — still
+pending: (1) an app-classification exercise for O2 Data Analytics itself
+(the same exercise already done for EDM Infographics — never done for
+this app, and given it handles real names/real construction data, it
+likely doesn't land at "Non-Sensitive"), and (2) explicit governance
+sign-off specifically for persistent storage on Neon (an external,
+non-GCC-vetted service — GCC itself runs on the same commercial cloud
+hyperscalers underneath, so the real distinction is vendor vetting, not
+"cloud vs. not cloud"). Do not point this at real data until both are done.
 
-**Schema direction decided, not yet implemented** — a hybrid relational +
-JSONB model, not a fully normalized one:
+**Provider**: Neon (serverless Postgres, AWS `ap-southeast-1`) — provisioned
+directly/independently (not through RabbitDeploy, though it's the same
+underlying service RabbitDeploy also offers). Connection string in
+`DATABASE_URL` (`.env`/`.env.staging`), same bring-your-own-DB pattern
+already established for `GEMINI_API_KEY` — Airbase itself still has no
+managed database.
+
+**GCC egress to Neon — confirmed working.** This was flagged as the one
+thing that could block the whole plan (outbound HTTPS was already known
+to work via live Gemini calls, but Postgres uses a different port, and
+GCC has shown tighter controls elsewhere — CSP enforcement, mandatory
+hardened base images). Verified via a temporary sidebar connectivity-test
+button (added, confirmed working live on Airbase staging, then removed
+once confirmed — see git history around 2026-07-15 if this needs
+resurrecting for any reason). Egress is not a blocker.
+
+**Schema implemented** (`schema.sql`, applied directly to the Neon
+instance) — hybrid relational + JSONB, not fully normalized:
 ```
-Projects(id, name, description, created_at)
-Files(id, project_id FK, form_type, filename, detected_columns JSONB, uploaded_at)
-Records(id, file_id FK, row_index, data JSONB)   -- one row per original spreadsheet row
-Analyses(id, file_id FK, type, result JSONB/TEXT, created_at)
+projects(id, name, description, created_at)
+files(id, project_id FK, form_type, filename, detected_columns JSONB, uploaded_at)
+records(id, file_id FK, row_index, data JSONB)   -- one row per original spreadsheet row
+analyses(id, file_id FK, type CHECK IN ('insights','classification'), result JSONB, created_at)
 ```
-`Projects`/`Files` are normal typed columns since they have a genuinely
-stable shape. `Records.data` is JSONB specifically because Optimus forms
+`projects`/`files` are normal typed columns since they have a genuinely
+stable shape. `records.data` is JSONB specifically because Optimus forms
 have completely different, unrelated column sets (Quality Defects: 28
 columns incl. trade-specific pairs; Safety Observation: 8; Contract
 Cashflow: unconfirmed) — a fully normalized table-per-form-type schema
@@ -312,21 +336,86 @@ would force a migration every time a new form type appears, reintroducing
 at the database layer the exact per-form hardcoding problem the app's code
 already deliberately moved away from once (see "Architecture decision"
 above). `detected_columns` caches `guess_columns()`'s output per file so
-it doesn't need recomputing.
+it doesn't need recomputing. GIN index on `records.data` for querying into
+JSONB fields (e.g. `data->>'Workflow'`).
 
 **Rejected alternatives**: classic EAV (entity-attribute-value, one row
 per cell) — even more flexible than JSONB but notoriously bad for
 query/join performance, JSONB is the modern equivalent without that
 downside. A NoSQL document DB instead of Postgres — no real gain given
 Neon/Postgres is already the chosen provider, and would lose clean
-relational structure for `Projects`/`Files` that don't need flexibility.
+relational structure for `projects`/`files` that don't need flexibility.
 
-**Not yet checked**: whether Airbase's GCC network egress actually allows
-outbound Postgres connections at all — confirmed outbound HTTPS works
-(Gemini calls succeed live), but Postgres typically uses a different port,
-and GCC environments have shown tighter controls elsewhere (CSP
-enforcement, mandatory hardened base images). Cheap to verify once Neon
-exists, before building real features around it.
+**`db.py`** — thin Python layer over the schema, deliberately kept
+separate from `app.py` (distinct concern from the Streamlit UI):
+`create_project`, `save_file`, `load_file_records`, `save_analysis`,
+`list_projects`, `list_files`. One real correctness fix worth noting:
+`save_file` serializes rows via `df.to_json(orient="records")`, not a
+naive `df.to_dict()` + `json.dumps()` — the naive approach raises
+`TypeError` the instant a row contains a numpy `int64`/`float64` or a
+`Timestamp`/`NaT`, which is every real Optimus export (dates, numeric
+scores, etc.). pandas' own JSON encoder already handles these correctly;
+re-inventing that conversion by hand was the wrong instinct.
+
+**Verified end-to-end** against the real Neon instance with synthetic
+test data covering the actual edge cases that matter (missing dates,
+missing numbers, missing text) — all of create project → save file+records
+→ load back → verify round-trip → save both analysis types → list
+projects/files passed. Test rows deleted afterward; Neon is clean.
+
+### Not yet done
+- Not wired into the Streamlit UI at all yet — `db.py` exists and works,
+  but `app.py` still only processes uploads in-memory per session. Next
+  step is a project-selector UI plus changing the upload flow to persist
+  via `save_file`/`save_analysis` instead of (or alongside) session state.
+- The governance items above (app classification + explicit Neon
+  persistence sign-off) — required before any real data goes in.
+- No read-side UI yet for browsing past projects/files/analyses.
+
+## Optimus API feasibility (investigated, not pursued) (2026-07-15)
+Investigated whether Optimus could be integrated with directly (API pull)
+instead of manual Excel export, to remove the human export-then-upload
+step entirely.
+
+**Finding**: Optimus is almost certainly JTC's tenant of LeapThought's
+**FulcrumHQ** platform, not a bespoke system — confirmed via the
+`optimus.fulcrumhq.build` subdomain (SaaS vendors host client instances
+exactly this way) and via the user's own DevTools Network tab on a live
+logged-in session, which showed real internal API calls (`GetAll`,
+`Get`, `Count`, `query`, `GetCurrentLoginInformations`) against an
+ASP.NET/.NET backend (PascalCase endpoint naming, a SignalR WebSocket
+connection). The `IssueTypeId=1544` parameter matched the dashboard URL
+exactly, and "Issues" as the core entity name matches this project's own
+export filenames (`Issues-51-Quality Defects Inspection Form.xlsx` etc.)
+— confirms FulcrumHQ's data model organizes everything as "Issues" with a
+`DefinitionType`/`IssueTypeId` distinguishing form types.
+
+**LeapThought's own marketing explicitly advertises API/interoperability
+capability** ("Interoperability, APIs & Open Standards"), but there's no
+public developer portal, endpoint documentation, or auth specification —
+what exists is confirmed to work, but is an internal/private API built
+for FulcrumHQ's own frontend, not a published third-party contract.
+
+**Decision: not pursued as unauthorized use.** Calling these endpoints
+directly without the vendor's sanction would very likely breach JTC's
+actual contract/ToS with LeapThought, has zero stability guarantee (could
+change without notice), and is a genuinely different risk category from
+automating an internal tool. Declined to assess "how feasible would
+unauthorized access be" even as a hypothetical — this needs to go through
+whoever manages JTC's LeapThought/FulcrumHQ vendor relationship, not be
+attempted unilaterally.
+
+**If pursuing officially, realistic options in rough order of
+practicality** (none attempted — all require the vendor relationship
+owner, not something buildable from this project alone): a direct,
+customer-specific access grant to the already-confirmed-working API; a
+scheduled/batch export feed (SFTP/webhook/cloud storage) instead of a
+live API; an OData feed or Power BI/Power Automate connector (plausible
+given the confirmed Microsoft-stack backend, and this project's own RPA
+work already uses Power Automate); webhooks; a paid custom-integration
+engagement. Manual export remains the correct approach until/unless one
+of these is actually secured — not a stopgap to feel obligated to
+engineer around.
 
 ## Deployment overview — three platforms coexist (2026-07-01)
 All three hosting targets are live simultaneously. No conflicts — each uses its
