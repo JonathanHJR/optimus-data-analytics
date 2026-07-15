@@ -354,24 +354,6 @@ st.sidebar.title("Optimus Analytics")
 st.sidebar.write("Upload an Excel export from O2 to begin.")
 uploaded = st.sidebar.file_uploader("Excel file (.xlsx)", type=["xlsx", "xls"])
 
-# TEMPORARY — verifying Airbase's network can reach Neon before building any
-# real database feature on top of it. Remove once confirmed either way.
-with st.sidebar.expander("🔌 Database connectivity test"):
-    if st.button("Test Neon connection"):
-        db_url = get_database_url()
-        if not db_url:
-            st.error("No DATABASE_URL found in secrets or environment.")
-        else:
-            try:
-                conn = psycopg2.connect(db_url, connect_timeout=10)
-                cur = conn.cursor()
-                cur.execute("SELECT 1")
-                result = cur.fetchone()[0]
-                conn.close()
-                st.success(f"Connected — SELECT 1 returned {result}")
-            except Exception as e:
-                st.error(f"Connection failed: {e}")
-
 if uploaded is None:
     st.title("Optimus Data Analytics Dashboard")
     st.info(
