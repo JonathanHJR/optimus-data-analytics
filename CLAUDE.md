@@ -513,14 +513,39 @@ gated, and that deleting actually removes the row from Neon (checked via
 `db.get_latest_analysis()` returning `None` afterward) and brings the
 generate/propose flow back. Test data cleaned up afterward both times.
 
-## Empty-state message and column detection at small row counts
+## Empty-state message removed, expanders replaced with st.dialog modals (2026-07-15)
 The empty-state info message (shown before any file is uploaded/loaded)
-was kept, not removed — it's the only explanation a first-time user gets
-of what the app actually does (generic column detection → AI
-interpretation), and removing it would leave nothing but a bare stop.
-Reworded slightly to point at the Manage section by name instead of a
-vague "above", since the sidebar's old "load a saved file" dropdown no
-longer exists.
+was removed per explicit request — the app now just `st.stop()`s silently
+before any data exists, no onboarding paragraph.
+
+Separately, the Manage section's `st.expander`-based rename/delete UI was
+replaced with real popup modals via `st.dialog` (stable since Streamlit
+~1.37, confirmed available on 1.58 which this app runs): "New project"
+(sidebar), "Rename project", "Delete project", "Delete file" are each a
+`@st.dialog`-decorated function called directly from a button's `if`
+block. This was a direct fix for reported UX friction — expanders push
+everything below them down the page when opened, which felt heavy for
+occasional low-frequency actions, and the app had accumulated four
+different expanding/inline-reveal patterns (sidebar "+ New project"
+fields, Rename expander, Delete-project expander, two-click inline
+delete-confirm per file). A dialog floats over the page as an overlay and
+doesn't disturb the surrounding layout at all, so all four collapsed into
+one consistent interaction pattern. The per-file delete's old two-click
+inline confirm (toggle a warning + Yes/Cancel buttons in place) became a
+single 🗑️ icon button that opens the same kind of confirm dialog.
+
+Dialog functions are defined once, near the top of the sidebar/Manage
+code (after `cached_list_projects`/`cached_list_files` are already
+defined, since the dialogs call them), and invoked with per-row arguments
+(e.g. `delete_file_dialog(f)`) from inside the saved-files loop — calling
+a `@st.dialog` function is what opens it for that rerun; Streamlit tracks
+the open/closed state internally afterward.
+
+Verified with Playwright: new-project dialog opens and creates +
+auto-selects the project, rename dialog opens and renames, file
+delete-dialog opens and removes the file (confirmed gone from Neon),
+project delete-dialog opens and removes the project. Test data cleaned
+up afterward.
 
 Also worth knowing for anyone building small test fixtures:
 `guess_columns()`'s category-vs-text cardinality threshold is

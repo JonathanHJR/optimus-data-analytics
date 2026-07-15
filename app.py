@@ -357,6 +357,63 @@ def classify_all(client: genai.Client, values: list[str], categories: list[str],
 # ----------------------------------------------------------------------
 # Sidebar — project selection, upload, and database load/save
 # ----------------------------------------------------------------------
+# ---- Project/file management dialogs ----
+# Real popup modals (st.dialog) instead of st.expander for these — an
+# expander pushes everything below it down the page when opened, which
+# felt heavy for occasional actions like rename/delete. A dialog floats
+# over the page and doesn't disturb the surrounding layout at all.
+@st.dialog("New project")
+def new_project_dialog():
+    new_name = st.text_input("Project name")
+    new_desc = st.text_input("Description (optional)")
+    if st.button("Create project", type="primary") and new_name.strip():
+        db.create_project(new_name.strip(), new_desc.strip())
+        cached_list_projects.clear()
+        st.session_state["_pending_project_choice"] = new_name.strip()
+        st.rerun()
+
+
+@st.dialog("Rename project")
+def rename_project_dialog(project: dict):
+    new_name = st.text_input("Name", value=project["name"])
+    new_desc = st.text_input("Description", value=project.get("description") or "")
+    if st.button("Save changes", type="primary") and new_name.strip():
+        db.rename_project(project["id"], new_name.strip(), new_desc.strip())
+        cached_list_projects.clear()
+        st.session_state["_pending_project_choice"] = new_name.strip()
+        st.rerun()
+
+
+@st.dialog("Delete project")
+def delete_project_dialog(project: dict):
+    st.warning(
+        f"This permanently deletes \"{project['name']}\" and every "
+        "file/analysis saved under it. This cannot be undone."
+    )
+    confirm_text = st.text_input(f"Type \"{project['name']}\" to confirm")
+    if st.button("Delete project", type="primary"):
+        if confirm_text == project["name"]:
+            db.delete_project(project["id"])
+            cached_list_projects.clear()
+            st.session_state["_pending_project_choice"] = "(none)"
+            st.session_state.pop("loaded_file", None)
+            st.rerun()
+        else:
+            st.error("Typed name doesn't match — project not deleted.")
+
+
+@st.dialog("Delete file")
+def delete_file_dialog(file_row: dict):
+    st.warning(f"Delete '{file_row['filename']}' and its saved analyses? This cannot be undone.")
+    if st.button("Yes, delete", type="primary"):
+        db.delete_file(file_row["id"])
+        cached_list_files.clear()
+        if st.session_state.get("db_file_id") == file_row["id"]:
+            st.session_state.pop("db_file_id", None)
+            st.session_state.pop("loaded_file", None)
+        st.rerun()
+
+
 st.sidebar.title("Optimus Analytics")
 
 # Database features degrade gracefully — a missing/unreachable DATABASE_URL
@@ -373,7 +430,7 @@ selected_project_id = None
 if db_available:
     with st.sidebar.expander("📁 Project", expanded=True):
         project_options = {p["name"]: p["id"] for p in projects}
-        all_choices = ["(none)", "+ New project"] + list(project_options.keys())
+        all_choices = ["(none)"] + list(project_options.keys())
 
         # Use key= so Streamlit manages this widget's state natively,
         # instead of computing index= from a session_state snapshot read
@@ -390,21 +447,15 @@ if db_available:
         if st.session_state.get("project_choice") not in all_choices:
             st.session_state["project_choice"] = "(none)"
         choice = st.selectbox(
-            "Select or create a project",
+            "Select a project",
             all_choices,
             key="project_choice",
         )
-
-        if choice == "+ New project":
-            new_name = st.text_input("Project name")
-            new_desc = st.text_input("Description (optional)")
-            if st.button("Create project") and new_name.strip():
-                db.create_project(new_name.strip(), new_desc.strip())
-                cached_list_projects.clear()
-                st.session_state["_pending_project_choice"] = new_name.strip()
-                st.rerun()
-        elif choice != "(none)":
+        if choice != "(none)":
             selected_project_id = project_options[choice]
+
+        if st.button("+ New project"):
+            new_project_dialog()
 
 st.sidebar.write("Upload an Excel export from O2 to begin.")
 uploaded = st.sidebar.file_uploader("Excel file (.xlsx)", type=["xlsx", "xls"])
@@ -423,44 +474,12 @@ st.title("Optimus Data Analytics Dashboard")
 if db_available and selected_project_id:
     current_project = next((p for p in projects if p["id"] == selected_project_id), None)
     with st.container(border=True):
-        st.subheader(f"📁 Manage: {current_project['name']}")
-
-        with st.expander("Rename / edit project"):
-            # Keyed per project_id (not a fixed key) so switching projects
-            # gives each one its own fresh widget state instead of leaking
-            # stale typed-in text from whichever project was edited last —
-            # the same class of bug just fixed for the project selectbox.
-            new_proj_name = st.text_input(
-                "Name", value=current_project["name"], key=f"rename_name_{selected_project_id}"
-            )
-            new_proj_desc = st.text_input(
-                "Description", value=current_project.get("description") or "",
-                key=f"rename_desc_{selected_project_id}",
-            )
-            if st.button("Save changes", key=f"rename_save_{selected_project_id}") and new_proj_name.strip():
-                db.rename_project(selected_project_id, new_proj_name.strip(), new_proj_desc.strip())
-                cached_list_projects.clear()
-                st.session_state["_pending_project_choice"] = new_proj_name.strip()
-                st.rerun()
-
-        with st.expander("⚠️ Delete this project"):
-            st.warning(
-                "This permanently deletes the project and every file/analysis "
-                "saved under it. This cannot be undone."
-            )
-            confirm_text = st.text_input(
-                f"Type the project name (\"{current_project['name']}\") to confirm",
-                key=f"delete_proj_confirm_{selected_project_id}",
-            )
-            if st.button("Delete project", key=f"delete_proj_btn_{selected_project_id}"):
-                if confirm_text == current_project["name"]:
-                    db.delete_project(selected_project_id)
-                    cached_list_projects.clear()
-                    st.session_state["_pending_project_choice"] = "(none)"
-                    st.session_state.pop("loaded_file", None)
-                    st.rerun()
-                else:
-                    st.error("Typed name doesn't match — project not deleted.")
+        header_col, rename_col, delete_col = st.columns([4, 1, 1])
+        header_col.subheader(f"📁 Manage: {current_project['name']}")
+        if rename_col.button("✏️ Rename", key=f"open_rename_{selected_project_id}"):
+            rename_project_dialog(current_project)
+        if delete_col.button("🗑️ Delete", key=f"open_delete_proj_{selected_project_id}"):
+            delete_project_dialog(current_project)
 
         st.divider()
         st.write("**Saved files**")
@@ -478,34 +497,10 @@ if db_available and selected_project_id:
                     "detected_columns": f["detected_columns"],
                 }
                 st.rerun()
-            delete_pending_key = f"confirm_delete_{f['id']}"
-            if fcol4.button("Delete", key=f"delete_btn_{f['id']}"):
-                st.session_state[delete_pending_key] = True
-            if st.session_state.get(delete_pending_key):
-                st.warning(f"Delete '{f['filename']}' and its saved analyses? This cannot be undone.")
-                cc1, cc2 = st.columns(2)
-                if cc1.button("Yes, delete", key=f"confirm_yes_{f['id']}"):
-                    db.delete_file(f["id"])
-                    cached_list_files.clear()
-                    if st.session_state.get("db_file_id") == f["id"]:
-                        st.session_state.pop("db_file_id", None)
-                        st.session_state.pop("loaded_file", None)
-                    st.session_state.pop(delete_pending_key, None)
-                    st.rerun()
-                if cc2.button("Cancel", key=f"confirm_no_{f['id']}"):
-                    st.session_state.pop(delete_pending_key, None)
-                    st.rerun()
+            if fcol4.button("🗑️", key=f"delete_btn_{f['id']}"):
+                delete_file_dialog(f)
 
 if uploaded is None and loaded_file_info is None:
-    st.info(
-        "👈 Upload an Optimus Excel export in the sidebar to get started, "
-        "or pick a project and load a saved file from the Manage section "
-        "above.\n\n"
-        "Works with any Optimus export form — this app auto-detects date, "
-        "status, and category columns generically and shows a quick "
-        "aggregate overview, then lets AI Insights do the actual "
-        "interpretation."
-    )
     st.stop()
 
 if loaded_file_info is not None:
