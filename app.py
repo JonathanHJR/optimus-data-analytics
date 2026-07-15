@@ -414,8 +414,6 @@ def delete_file_dialog(file_row: dict):
         st.rerun()
 
 
-st.sidebar.title("Optimus Analytics")
-
 # Database features degrade gracefully — a missing/unreachable DATABASE_URL
 # (e.g. local dev without .env set up) hides the project/save UI instead of
 # crashing the app; upload-and-analyse-only still works exactly as before.
@@ -426,75 +424,80 @@ except Exception:
     projects = []
     db_available = False
 
-selected_project_id = None
-if db_available:
-    with st.sidebar.expander("📁 Project", expanded=True):
-        project_options = {p["name"]: p["id"] for p in projects}
-        all_choices = ["(none)"] + list(project_options.keys())
-
-        # Use key= so Streamlit manages this widget's state natively,
-        # instead of computing index= from a session_state snapshot read
-        # before this rerun's click is processed into it — that pattern
-        # caused a one-rerun lag where a click would visibly revert and
-        # need a second click to stick. Programmatic jumps (e.g. to a
-        # newly created/renamed project) go through _pending_project_choice
-        # instead of writing "project_choice" directly, because Streamlit
-        # raises if a keyed widget's session_state entry is written after
-        # that widget has already been instantiated in the same run — this
-        # indirection is applied here, before the selectbox below exists.
-        if "_pending_project_choice" in st.session_state:
-            st.session_state["project_choice"] = st.session_state.pop("_pending_project_choice")
-        if st.session_state.get("project_choice") not in all_choices:
-            st.session_state["project_choice"] = "(none)"
-        choice = st.selectbox(
-            "Select a project",
-            all_choices,
-            key="project_choice",
-        )
-        if choice != "(none)":
-            selected_project_id = project_options[choice]
-
-        if st.button("+ New project"):
-            new_project_dialog()
-
-st.sidebar.write("Upload an Excel export from O2 to begin.")
-uploaded = st.sidebar.file_uploader("Excel file (.xlsx)", type=["xlsx", "xls"])
-
-# A fresh upload always takes precedence over a previously loaded saved file.
-if uploaded is not None:
-    st.session_state.pop("loaded_file", None)
-loaded_file_info = st.session_state.get("loaded_file")
-
-# A loaded file belongs to whatever project it was loaded from. If the
-# project selector no longer points at that project (switched to "(none)"
-# or to a different project), clear it — otherwise its data keeps showing
-# with no visible project context for it, which is stale state, not a
-# real cross-project view (nothing here lets you compare across projects).
-if loaded_file_info is not None and loaded_file_info.get("project_id") != selected_project_id:
-    st.session_state.pop("loaded_file", None)
-    loaded_file_info = None
-
 st.title("Optimus Data Analytics Dashboard")
 
-# ---- Manage: project rename/delete, saved-files browse/load/delete ----
-# Lives in the main content area (not the sidebar) specifically so it has
-# room to show a real per-file action list rather than cramped dropdowns —
-# and so it's usable even before any file is uploaded/loaded this session.
-if db_available and selected_project_id:
-    current_project = next((p for p in projects if p["id"] == selected_project_id), None)
-    with st.container(border=True):
+# ---- Top panel: project selection, upload, and Manage — all in one place ----
+# Previously project selection/upload lived in the sidebar while rename/
+# delete/saved-files lived in a separate main-content block further down —
+# two locations for what's really one "set up this session" job. Moved
+# everything here as a single compact panel: it's also the only thing that
+# was ever in the sidebar (aside from a couple of conditional widgets below,
+# also moved out), so removing it reclaims that whole strip of width for
+# the charts/tables every tab actually needs. Streamlit only reserves
+# sidebar space when something is placed into st.sidebar — with nothing
+# left there, none renders at all.
+selected_project_id = None
+with st.container(border=True):
+    ctrl_col1, ctrl_col2, ctrl_col3 = st.columns([2, 1, 2])
+    with ctrl_col1:
+        if db_available:
+            project_options = {p["name"]: p["id"] for p in projects}
+            all_choices = ["(none)"] + list(project_options.keys())
+
+            # Use key= so Streamlit manages this widget's state natively,
+            # instead of computing index= from a session_state snapshot read
+            # before this rerun's click is processed into it — that pattern
+            # caused a one-rerun lag where a click would visibly revert and
+            # need a second click to stick. Programmatic jumps (e.g. to a
+            # newly created/renamed project) go through _pending_project_choice
+            # instead of writing "project_choice" directly, because Streamlit
+            # raises if a keyed widget's session_state entry is written after
+            # that widget has already been instantiated in the same run — this
+            # indirection is applied here, before the selectbox below exists.
+            if "_pending_project_choice" in st.session_state:
+                st.session_state["project_choice"] = st.session_state.pop("_pending_project_choice")
+            if st.session_state.get("project_choice") not in all_choices:
+                st.session_state["project_choice"] = "(none)"
+            choice = st.selectbox("Project", all_choices, key="project_choice")
+            if choice != "(none)":
+                selected_project_id = project_options[choice]
+    with ctrl_col2:
+        if db_available:
+            st.write("")  # nudges the button down to align with the selectbox
+            if st.button("+ New project"):
+                new_project_dialog()
+    with ctrl_col3:
+        uploaded = st.file_uploader("Upload Excel export", type=["xlsx", "xls"])
+
+    # A fresh upload always takes precedence over a previously loaded saved file.
+    if uploaded is not None:
+        st.session_state.pop("loaded_file", None)
+    loaded_file_info = st.session_state.get("loaded_file")
+
+    # A loaded file belongs to whatever project it was loaded from. If the
+    # project selector no longer points at that project (switched to "(none)"
+    # or to a different project), clear it — otherwise its data keeps showing
+    # with no visible project context for it, which is stale state, not a
+    # real cross-project view (nothing here lets you compare across projects).
+    if loaded_file_info is not None and loaded_file_info.get("project_id") != selected_project_id:
+        st.session_state.pop("loaded_file", None)
+        loaded_file_info = None
+
+    # ---- Manage: project rename/delete, saved-files browse/load/delete ----
+    if db_available and selected_project_id:
+        current_project = next((p for p in projects if p["id"] == selected_project_id), None)
+        st.divider()
         header_col, rename_col, delete_col = st.columns([4, 1, 1])
-        header_col.subheader(f"📁 Manage: {current_project['name']}")
+        # Plain bold text, not st.subheader — this is a per-project label
+        # inside an otherwise compact control panel, not a section heading.
+        header_col.markdown(f"**📁 {current_project['name']}**")
         if rename_col.button("✏️ Rename", key=f"open_rename_{selected_project_id}"):
             rename_project_dialog(current_project)
         if delete_col.button("🗑️ Delete", key=f"open_delete_proj_{selected_project_id}"):
             delete_project_dialog(current_project)
 
-        st.divider()
-        st.write("**Saved files**")
         saved_files = cached_list_files(selected_project_id)
-        if not saved_files:
-            st.caption("No files saved to this project yet.")
+        st.caption("Saved files" if saved_files else "No files saved to this project yet.")
         for f in saved_files:
             fcol1, fcol2, fcol3, fcol4 = st.columns([3, 2, 1, 1])
             fcol1.write(f["filename"])
@@ -543,7 +546,7 @@ else:
         st.stop()
 
     sheet_name = (
-        st.sidebar.selectbox("Sheet", list(sheets.keys()))
+        st.selectbox("Sheet", list(sheets.keys()))
         if len(sheets) > 1
         else list(sheets.keys())[0]
     )
@@ -582,14 +585,17 @@ if st.session_state.get("data_identity") != data_identity:
             }
 
 if db_available and selected_project_id and data_identity[0] == "upload" and "db_file_id" not in st.session_state:
-    with st.sidebar.expander("💾 Save to database"):
-        form_type = st.text_input("Form type / label", value=Path(filename).stem)
-        if st.button("Save this file to the selected project"):
+    save_col1, save_col2 = st.columns([3, 1])
+    with save_col1:
+        form_type = st.text_input("Save to database as", value=Path(filename).stem)
+    with save_col2:
+        st.write("")  # nudges the button down to align with the text input
+        if st.button("💾 Save", use_container_width=True):
             file_id = db.save_file(selected_project_id, form_type, filename, cols, df)
             cached_list_files.clear()
             st.session_state["db_file_id"] = file_id
             st.toast(f"Saved to database (file id {file_id}).", icon="✅")
-            # Rerun so the Manage section above (already rendered earlier
+            # Rerun so the Manage panel above (already rendered earlier
             # in this same script pass, from stale cached data) picks up
             # the newly saved file immediately instead of on the next
             # unrelated interaction. st.toast survives this one rerun.
@@ -609,9 +615,10 @@ if cols["date"]:
 
 # Optional global filter on the first detected category column
 if cols["category"]:
-    with st.sidebar:
-        st.subheader("Filter")
+    filt_col1, filt_col2 = st.columns([1, 2])
+    with filt_col1:
         filt_col = st.selectbox("Filter by", ["(none)"] + cols["category"])
+    with filt_col2:
         if filt_col != "(none)":
             choices = st.multiselect(
                 f"{filt_col} values",

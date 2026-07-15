@@ -571,6 +571,46 @@ clears it and the tabs disappear; loading it again then switching
 straight to Project B also clears it (not just the "(none)" case); B's
 own file still loads normally afterward. Test data cleaned up.
 
+## Sidebar removed entirely — everything moved to a top panel (2026-07-15)
+Reported UX friction: project selection and upload lived in the sidebar,
+while Manage (rename/delete/saved-files) lived in a separate block in the
+main content area further down — two locations for what's really one
+"set up this session" job, plus a permanent strip of sidebar width that
+was empty most of the time. Fix: every remaining `st.sidebar.*` call was
+moved into the main content area — Project selector, "+ New project",
+file uploader, the multi-sheet "Sheet" selector, "Save to database", and
+the category "Filter" — and merged into one bordered panel at the very
+top, right under the page title, with Manage appearing inside the same
+panel (below a divider) once a project is selected.
+
+Streamlit only reserves sidebar space when something is placed into
+`st.sidebar` during a run; with nothing left there, no sidebar renders at
+all (confirmed via Playwright — zero `stSidebar`/`stSidebarCollapsedControl`
+elements in the DOM), so this is a real width reclaim for the KPI cards
+and charts below, not just a relocation.
+
+Also tightened the Manage panel's own footprint per request: the project
+name went from `st.subheader` (large heading font) to plain bold
+markdown text (`**📁 {name}**`, body-sized), and the "Saved files" label
+from a bold `st.write` line to a single `st.caption` that also doubles as
+the empty-state message ("No files saved..." vs "Saved files") instead of
+two separate lines. The old "💾 Save to database" `st.expander` became a
+two-column inline row (label input + button) with no click-to-expand step
+at all, consistent with dropping expanders elsewhere in favor of either
+dialogs (for occasional, higher-stakes actions) or just always-visible
+compact rows (for actions used every time a file is uploaded).
+
+Verified with Playwright: screenshotted the empty state (compact
+side-by-side Project/Upload panel, full test_page width, zero sidebar
+elements) and the loaded-data state (Manage panel + KPI row + compact
+Filter row all visible without scrolling on a 1400×900 viewport). Re-ran
+the full create → rename → upload+save → delete-file → delete-project
+dialog flow against the restructured layout — all steps still pass
+(confirmed project/file deletion directly against Neon where the
+Playwright text-match assertion itself was flaky, a known issue with
+`text=` locators matching multiple partially-overlapping elements, not an
+app bug — see the same caveat noted earlier for file-list assertions).
+
 Also worth knowing for anyone building small test fixtures:
 `guess_columns()`'s category-vs-text cardinality threshold is
 `1 < nunique <= max(30, len(df) * 0.5)` — with a 3-row test file, that
