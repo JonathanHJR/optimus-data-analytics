@@ -18,11 +18,12 @@ import os
 import time
 from pathlib import Path
 import pandas as pd
-import psycopg2
 import streamlit as st
 import plotly.express as px
 from google import genai
 from google.genai import types as genai_types
+
+import db
 
 # Verify this against the model picker at aistudio.google.com if AI Insights
 # calls start failing — free-tier model names/availability change over time.
@@ -138,17 +139,6 @@ def get_gemini_client() -> genai.Client | None:
         pass
     api_key = api_key or os.environ.get("GEMINI_API_KEY")
     return genai.Client(api_key=api_key) if api_key else None
-
-
-def get_database_url() -> str | None:
-    """Resolve the Neon connection string the same way as the Gemini API
-    key above: Streamlit secrets first, then the environment."""
-    url = None
-    try:
-        url = st.secrets.get("DATABASE_URL")
-    except Exception:
-        pass
-    return url or os.environ.get("DATABASE_URL")
 
 
 def build_data_summary(df: pd.DataFrame, cols: dict, classification: dict | None = None) -> str:
@@ -348,13 +338,77 @@ def classify_all(client: genai.Client, values: list[str], categories: list[str],
 
 
 # ----------------------------------------------------------------------
-# Sidebar — upload
+# Sidebar — project selection, upload, and database load/save
 # ----------------------------------------------------------------------
 st.sidebar.title("Optimus Analytics")
+
+# Database features degrade gracefully — a missing/unreachable DATABASE_URL
+# (e.g. local dev without .env set up) hides the project/save UI instead of
+# crashing the app; upload-and-analyse-only still works exactly as before.
+try:
+    projects = db.list_projects()
+    db_available = True
+except Exception:
+    projects = []
+    db_available = False
+
+selected_project_id = None
+if db_available:
+    with st.sidebar.expander("📁 Project", expanded=True):
+        project_options = {p["name"]: p["id"] for p in projects}
+        all_choices = ["(none)", "+ New project"] + list(project_options.keys())
+
+        # Explicitly track the intended selection across reruns — a plain
+        # st.selectbox() keeps showing "+ New project" (and its now-stale
+        # text inputs) even after a new project is created and the options
+        # list refreshes, since Streamlit doesn't know to re-point the
+        # widget at the newly created entry on its own.
+        default_choice = st.session_state.get("project_choice", "(none)")
+        if default_choice not in all_choices:
+            default_choice = "(none)"
+        choice = st.selectbox(
+            "Select or create a project",
+            all_choices,
+            index=all_choices.index(default_choice),
+        )
+        st.session_state["project_choice"] = choice
+
+        if choice == "+ New project":
+            new_name = st.text_input("Project name")
+            new_desc = st.text_input("Description (optional)")
+            if st.button("Create project") and new_name.strip():
+                db.create_project(new_name.strip(), new_desc.strip())
+                st.session_state["project_choice"] = new_name.strip()
+                st.rerun()
+        elif choice != "(none)":
+            selected_project_id = project_options[choice]
+
 st.sidebar.write("Upload an Excel export from O2 to begin.")
 uploaded = st.sidebar.file_uploader("Excel file (.xlsx)", type=["xlsx", "xls"])
 
-if uploaded is None:
+# A fresh upload always takes precedence over a previously loaded saved file.
+if uploaded is not None:
+    st.session_state.pop("loaded_file", None)
+loaded_file_info = st.session_state.get("loaded_file")
+
+if db_available and selected_project_id:
+    saved_files = db.list_files(selected_project_id)
+    if saved_files:
+        with st.sidebar.expander("📂 Load a saved file"):
+            file_options = {
+                f"{f['filename']} ({f['uploaded_at']:%Y-%m-%d %H:%M})": f for f in saved_files
+            }
+            file_choice = st.selectbox("Saved files", ["(none)"] + list(file_options.keys()))
+            if file_choice != "(none)" and st.button("Load selected file"):
+                chosen = file_options[file_choice]
+                st.session_state["loaded_file"] = {
+                    "file_id": chosen["id"],
+                    "filename": chosen["filename"],
+                    "detected_columns": chosen["detected_columns"],
+                }
+                st.rerun()
+
+if uploaded is None and loaded_file_info is None:
     st.title("Optimus Data Analytics Dashboard")
     st.info(
         "👈 Upload an Optimus Excel export in the sidebar to get started.\n\n"
@@ -365,40 +419,68 @@ if uploaded is None:
     )
     st.stop()
 
-try:
-    sheets = load_excel(uploaded.read())
-except Exception:
-    st.error(
-        "Couldn't read that file as an Excel workbook. Make sure it's a "
-        "valid, uncorrupted `.xlsx`/`.xls` export from Optimus, then "
-        "re-upload it."
+if loaded_file_info is not None:
+    df = db.load_file_records(loaded_file_info["file_id"])
+    cols = loaded_file_info["detected_columns"]
+    filename = loaded_file_info["filename"]
+    data_identity = ("db_file", loaded_file_info["file_id"])
+    # Records round-trip through JSONB as plain ISO-format date strings, not
+    # a real datetime dtype. Parse them back explicitly here rather than
+    # relying on the dayfirst=True parsing used elsewhere for fresh Excel
+    # uploads (tuned for ambiguous DD/MM/YYYY exports) — dayfirst=True
+    # actively corrupts unambiguous ISO strings: confirmed it silently turns
+    # "2026-02-01" into "2026-01-02" and drops "2026-01-15" to NaT entirely.
+    for date_col in cols.get("date", []):
+        if date_col in df.columns:
+            df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
+else:
+    try:
+        sheets = load_excel(uploaded.read())
+    except Exception:
+        st.error(
+            "Couldn't read that file as an Excel workbook. Make sure it's a "
+            "valid, uncorrupted `.xlsx`/`.xls` export from Optimus, then "
+            "re-upload it."
+        )
+        st.stop()
+
+    if not sheets or all(s.empty for s in sheets.values()):
+        st.warning("This file has no data in any sheet — nothing to analyse.")
+        st.stop()
+
+    sheet_name = (
+        st.sidebar.selectbox("Sheet", list(sheets.keys()))
+        if len(sheets) > 1
+        else list(sheets.keys())[0]
     )
-    st.stop()
+    df = sheets[sheet_name].copy()
+    if df.empty:
+        st.warning(f"Sheet '{sheet_name}' has no rows — nothing to analyse.")
+        st.stop()
+    df.columns = [str(c).strip() for c in df.columns]
+    cols = guess_columns(df)
+    filename = uploaded.name
+    data_identity = ("upload", uploaded.name, uploaded.size)
 
-if not sheets or all(s.empty for s in sheets.values()):
-    st.warning("This file has no data in any sheet — nothing to analyse.")
-    st.stop()
-
-sheet_name = (
-    st.sidebar.selectbox("Sheet", list(sheets.keys()))
-    if len(sheets) > 1
-    else list(sheets.keys())[0]
-)
-df = sheets[sheet_name].copy()
-if df.empty:
-    st.warning(f"Sheet '{sheet_name}' has no rows — nothing to analyse.")
-    st.stop()
-df.columns = [str(c).strip() for c in df.columns]
-cols = guess_columns(df)
-
-# AI Insights is tied to whatever file was last analysed — clear it on a new
-# upload so a stale analysis from a previous file never lingers on screen.
-upload_identity = (uploaded.name, uploaded.size)
-if st.session_state.get("upload_identity") != upload_identity:
+# AI Insights/Classification are tied to whatever data was last analysed —
+# clear them whenever the underlying data changes (new upload or a
+# different saved file loaded) so a stale analysis never lingers on screen.
+if st.session_state.get("data_identity") != data_identity:
     st.session_state.pop("ai_insights", None)
     st.session_state.pop("taxonomy", None)
     st.session_state.pop("classification", None)
-    st.session_state["upload_identity"] = upload_identity
+    st.session_state.pop("db_file_id", None)
+    st.session_state["data_identity"] = data_identity
+    if loaded_file_info is not None:
+        st.session_state["db_file_id"] = loaded_file_info["file_id"]
+
+if db_available and selected_project_id and data_identity[0] == "upload" and "db_file_id" not in st.session_state:
+    with st.sidebar.expander("💾 Save to database"):
+        form_type = st.text_input("Form type / label", value=Path(filename).stem)
+        if st.button("Save this file to the selected project"):
+            file_id = db.save_file(selected_project_id, form_type, filename, cols, df)
+            st.session_state["db_file_id"] = file_id
+            st.success(f"Saved to database (file id {file_id}).")
 
 st.title("Optimus Data Analytics Dashboard")
 kpi_row(df, cols)
@@ -482,6 +564,8 @@ with tab_ai:
                 summary_text = build_data_summary(df, cols, classification)
                 try:
                     st.session_state["ai_insights"] = generate_ai_insights(client, summary_text)
+                    if "db_file_id" in st.session_state:
+                        db.save_analysis(st.session_state["db_file_id"], "insights", st.session_state["ai_insights"])
                 except genai.errors.APIError as e:
                     st.error(f"AI request failed: {e}")
         if "ai_insights" in st.session_state:
@@ -568,6 +652,12 @@ with tab_classify:
                                 "labels": result,
                                 "categories": confirmed_categories,
                             }
+                            if "db_file_id" in st.session_state:
+                                db.save_analysis(st.session_state["db_file_id"], "classification", {
+                                    "column": target_col,
+                                    "categories": confirmed_categories,
+                                    "labels": result.tolist(),
+                                })
                         except (genai.errors.APIError, json.JSONDecodeError) as e:
                             st.error(f"AI classification failed: {e}")
                     progress.empty()
