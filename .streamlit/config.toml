@@ -1,6 +1,10 @@
 [browser]
 gatherUsageStats = false
 
+[server]
+enableXsrfProtection = false
+enableCORS = false
+
 [theme]
 primaryColor = "#0B5394"
 backgroundColor = "#FFFFFF"
