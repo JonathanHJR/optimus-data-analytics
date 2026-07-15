@@ -380,9 +380,13 @@ if db_available:
         # before this rerun's click is processed into it — that pattern
         # caused a one-rerun lag where a click would visibly revert and
         # need a second click to stick. Programmatic jumps (e.g. to a
-        # newly created project) still work: setting
-        # st.session_state["project_choice"] right before st.rerun() below
-        # is the officially supported way to redirect a keyed widget.
+        # newly created/renamed project) go through _pending_project_choice
+        # instead of writing "project_choice" directly, because Streamlit
+        # raises if a keyed widget's session_state entry is written after
+        # that widget has already been instantiated in the same run — this
+        # indirection is applied here, before the selectbox below exists.
+        if "_pending_project_choice" in st.session_state:
+            st.session_state["project_choice"] = st.session_state.pop("_pending_project_choice")
         if st.session_state.get("project_choice") not in all_choices:
             st.session_state["project_choice"] = "(none)"
         choice = st.selectbox(
@@ -397,7 +401,7 @@ if db_available:
             if st.button("Create project") and new_name.strip():
                 db.create_project(new_name.strip(), new_desc.strip())
                 cached_list_projects.clear()
-                st.session_state["project_choice"] = new_name.strip()
+                st.session_state["_pending_project_choice"] = new_name.strip()
                 st.rerun()
         elif choice != "(none)":
             selected_project_id = project_options[choice]
@@ -410,27 +414,92 @@ if uploaded is not None:
     st.session_state.pop("loaded_file", None)
 loaded_file_info = st.session_state.get("loaded_file")
 
+st.title("Optimus Data Analytics Dashboard")
+
+# ---- Manage: project rename/delete, saved-files browse/load/delete ----
+# Lives in the main content area (not the sidebar) specifically so it has
+# room to show a real per-file action list rather than cramped dropdowns —
+# and so it's usable even before any file is uploaded/loaded this session.
 if db_available and selected_project_id:
-    saved_files = cached_list_files(selected_project_id)
-    if saved_files:
-        with st.sidebar.expander("📂 Load a saved file"):
-            file_options = {
-                f"{f['filename']} ({f['uploaded_at']:%Y-%m-%d %H:%M})": f for f in saved_files
-            }
-            file_choice = st.selectbox("Saved files", ["(none)"] + list(file_options.keys()))
-            if file_choice != "(none)" and st.button("Load selected file"):
-                chosen = file_options[file_choice]
-                st.session_state["loaded_file"] = {
-                    "file_id": chosen["id"],
-                    "filename": chosen["filename"],
-                    "detected_columns": chosen["detected_columns"],
-                }
+    current_project = next((p for p in projects if p["id"] == selected_project_id), None)
+    with st.container(border=True):
+        st.subheader(f"📁 Manage: {current_project['name']}")
+
+        with st.expander("Rename / edit project"):
+            # Keyed per project_id (not a fixed key) so switching projects
+            # gives each one its own fresh widget state instead of leaking
+            # stale typed-in text from whichever project was edited last —
+            # the same class of bug just fixed for the project selectbox.
+            new_proj_name = st.text_input(
+                "Name", value=current_project["name"], key=f"rename_name_{selected_project_id}"
+            )
+            new_proj_desc = st.text_input(
+                "Description", value=current_project.get("description") or "",
+                key=f"rename_desc_{selected_project_id}",
+            )
+            if st.button("Save changes", key=f"rename_save_{selected_project_id}") and new_proj_name.strip():
+                db.rename_project(selected_project_id, new_proj_name.strip(), new_proj_desc.strip())
+                cached_list_projects.clear()
+                st.session_state["_pending_project_choice"] = new_proj_name.strip()
                 st.rerun()
 
+        with st.expander("⚠️ Delete this project"):
+            st.warning(
+                "This permanently deletes the project and every file/analysis "
+                "saved under it. This cannot be undone."
+            )
+            confirm_text = st.text_input(
+                f"Type the project name (\"{current_project['name']}\") to confirm",
+                key=f"delete_proj_confirm_{selected_project_id}",
+            )
+            if st.button("Delete project", key=f"delete_proj_btn_{selected_project_id}"):
+                if confirm_text == current_project["name"]:
+                    db.delete_project(selected_project_id)
+                    cached_list_projects.clear()
+                    st.session_state["_pending_project_choice"] = "(none)"
+                    st.session_state.pop("loaded_file", None)
+                    st.rerun()
+                else:
+                    st.error("Typed name doesn't match — project not deleted.")
+
+        st.divider()
+        st.write("**Saved files**")
+        saved_files = cached_list_files(selected_project_id)
+        if not saved_files:
+            st.caption("No files saved to this project yet.")
+        for f in saved_files:
+            fcol1, fcol2, fcol3, fcol4 = st.columns([3, 2, 1, 1])
+            fcol1.write(f["filename"])
+            fcol2.caption(f"{f['form_type']} · {f['uploaded_at']:%Y-%m-%d %H:%M}")
+            if fcol3.button("Load", key=f"load_{f['id']}"):
+                st.session_state["loaded_file"] = {
+                    "file_id": f["id"],
+                    "filename": f["filename"],
+                    "detected_columns": f["detected_columns"],
+                }
+                st.rerun()
+            delete_pending_key = f"confirm_delete_{f['id']}"
+            if fcol4.button("Delete", key=f"delete_btn_{f['id']}"):
+                st.session_state[delete_pending_key] = True
+            if st.session_state.get(delete_pending_key):
+                st.warning(f"Delete '{f['filename']}' and its saved analyses? This cannot be undone.")
+                cc1, cc2 = st.columns(2)
+                if cc1.button("Yes, delete", key=f"confirm_yes_{f['id']}"):
+                    db.delete_file(f["id"])
+                    cached_list_files.clear()
+                    if st.session_state.get("db_file_id") == f["id"]:
+                        st.session_state.pop("db_file_id", None)
+                        st.session_state.pop("loaded_file", None)
+                    st.session_state.pop(delete_pending_key, None)
+                    st.rerun()
+                if cc2.button("Cancel", key=f"confirm_no_{f['id']}"):
+                    st.session_state.pop(delete_pending_key, None)
+                    st.rerun()
+
 if uploaded is None and loaded_file_info is None:
-    st.title("Optimus Data Analytics Dashboard")
     st.info(
-        "👈 Upload an Optimus Excel export in the sidebar to get started.\n\n"
+        "👈 Upload an Optimus Excel export in the sidebar to get started, "
+        "or load a saved file above if you have a project selected.\n\n"
         "Works with any Optimus export form — this app auto-detects date, "
         "status, and category columns generically and shows a quick "
         "aggregate overview, then lets AI Insights do the actual "
@@ -500,9 +569,19 @@ if db_available and selected_project_id and data_identity[0] == "upload" and "db
             file_id = db.save_file(selected_project_id, form_type, filename, cols, df)
             cached_list_files.clear()
             st.session_state["db_file_id"] = file_id
-            st.success(f"Saved to database (file id {file_id}).")
+            st.toast(f"Saved to database (file id {file_id}).", icon="✅")
+            # Rerun so the Manage section above (already rendered earlier
+            # in this same script pass, from stale cached data) picks up
+            # the newly saved file immediately instead of on the next
+            # unrelated interaction. st.toast survives this one rerun.
+            st.rerun()
 
-st.title("Optimus Data Analytics Dashboard")
+if db_available and selected_project_id:
+    project_name = next((p["name"] for p in projects if p["id"] == selected_project_id), "?")
+    st.caption(f"📁 Project: **{project_name}** · 📄 File: **{filename}**")
+elif filename:
+    st.caption(f"📄 File: **{filename}**")
+
 kpi_row(df, cols)
 if cols["date"]:
     primary_date = pd.to_datetime(df[cols["date"][0]], errors="coerce", dayfirst=True).dropna()

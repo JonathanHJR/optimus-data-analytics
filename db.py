@@ -121,3 +121,40 @@ def list_files(project_id: int) -> list[dict]:
             (project_id,),
         )
         return [dict(r) for r in cur.fetchall()]
+
+
+def get_project(project_id: int) -> dict | None:
+    with get_connection() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            "SELECT id, name, description, created_at FROM projects WHERE id = %s",
+            (project_id,),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+
+def rename_project(project_id: int, name: str, description: str = "") -> None:
+    with get_connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "UPDATE projects SET name = %s, description = %s WHERE id = %s",
+            (name, description, project_id),
+        )
+        conn.commit()
+
+
+def delete_project(project_id: int) -> None:
+    """Deletes the project and, via ON DELETE CASCADE, every file/record/
+    analysis under it. Caller is responsible for confirming this with the
+    user first — this function itself does not ask."""
+    with get_connection() as conn, conn.cursor() as cur:
+        cur.execute("DELETE FROM projects WHERE id = %s", (project_id,))
+        conn.commit()
+
+
+def delete_file(file_id: int) -> None:
+    """Deletes the file and, via ON DELETE CASCADE, its records/analyses.
+    Smaller blast radius than delete_project, but same caveat: caller
+    confirms first."""
+    with get_connection() as conn, conn.cursor() as cur:
+        cur.execute("DELETE FROM files WHERE id = %s", (file_id,))
+        conn.commit()

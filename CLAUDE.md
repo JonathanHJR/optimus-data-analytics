@@ -410,6 +410,57 @@ exactly. Test project deleted from Neon afterward.
   files yet (only load-one-file-at-a-time exists) — cross-file pattern
   recognition (the original motivation for persistence) isn't built.
 
+## Project/file management moved to main content area (2026-07-15)
+The sidebar had become a stack of expanders (Project selector, file
+uploader, "Load a saved file", "Save to database") — workable but cramped,
+and it had no delete/rename story at all. Rather than bolt delete/rename
+onto more sidebar expanders, added a `📁 Manage: <project>` section to the
+**main content area** (not a new `st.tabs()` entry — the existing
+`if uploaded is None and loaded_file_info is None: ... st.stop()` gate that
+the Overview/AI Insights/Classification/Raw Data tabs all sit behind would
+need larger restructuring to support a tab usable with no file loaded yet;
+a plain section above that gate gets the same "give it room" benefit
+without that rework). It renders whenever a project is selected — before
+the upload/empty-state gate, so it's usable with zero files loaded.
+
+**What it does**: rename project (name + description), delete project
+(type-the-project-name-to-confirm, since deletion cascades to every
+file/record/analysis under it — chose type-to-confirm over a plain
+Yes/No given that blast radius), and a saved-files list with per-row
+**Load** and **Delete** (two-click confirm — smaller blast radius than
+project delete, so a lighter confirmation pattern is proportionate). The
+old sidebar "📂 Load a saved file" expander was removed; the sidebar now
+only has the Project selector and file uploader. A `📁 Project: X · 📄
+File: Y` caption ("you are here") was added just above the KPI row.
+
+`db.py` gained `get_project`, `rename_project`, `delete_project`,
+`delete_file` — all thin, relying on the schema's `ON DELETE CASCADE` for
+the cleanup rather than manually deleting child rows.
+
+**Bug found and fixed**: `st.session_state["project_choice"] = ...`
+(used to redirect the project dropdown after create/rename/delete) raises
+`StreamlitAPIException` when it runs *after* the `project_choice`-keyed
+selectbox has already been instantiated earlier in the same script pass —
+which the rename/delete code paths do, since the Manage section they live
+in renders after the sidebar selectbox. Fixed by writing to an
+intermediate `_pending_project_choice` key instead, and applying it to
+`project_choice` at the very top of the sidebar block, before the
+selectbox exists for that run — the officially-supported way to redirect
+a keyed widget's value across a rerun.
+
+**Bug found and fixed**: saving a file to the database didn't call
+`st.rerun()`, so the Manage section (which renders earlier in script
+order than the save action, by design) kept showing its stale
+pre-save file list until some unrelated later interaction triggered a
+further rerun. Fixed by calling `st.rerun()` right after the save
+(with `st.toast()` for the success message, since it survives one rerun).
+
+Verified end-to-end with Playwright against a synthetic test file/project:
+create project → Manage section appears → rename → upload + save file →
+"you are here" indicator appears → file shows in Manage's saved-files
+list → delete file (confirm prompt → confirm → gone) → delete project
+(type-to-confirm → gone). Test data cleaned up from Neon afterward.
+
 ## Optimus API feasibility (investigated, not pursued) (2026-07-15)
 Investigated whether Optimus could be integrated with directly (API pull)
 instead of manual Excel export, to remove the human export-then-upload
