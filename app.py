@@ -375,20 +375,21 @@ if db_available:
         project_options = {p["name"]: p["id"] for p in projects}
         all_choices = ["(none)", "+ New project"] + list(project_options.keys())
 
-        # Explicitly track the intended selection across reruns — a plain
-        # st.selectbox() keeps showing "+ New project" (and its now-stale
-        # text inputs) even after a new project is created and the options
-        # list refreshes, since Streamlit doesn't know to re-point the
-        # widget at the newly created entry on its own.
-        default_choice = st.session_state.get("project_choice", "(none)")
-        if default_choice not in all_choices:
-            default_choice = "(none)"
+        # Use key= so Streamlit manages this widget's state natively,
+        # instead of computing index= from a session_state snapshot read
+        # before this rerun's click is processed into it — that pattern
+        # caused a one-rerun lag where a click would visibly revert and
+        # need a second click to stick. Programmatic jumps (e.g. to a
+        # newly created project) still work: setting
+        # st.session_state["project_choice"] right before st.rerun() below
+        # is the officially supported way to redirect a keyed widget.
+        if st.session_state.get("project_choice") not in all_choices:
+            st.session_state["project_choice"] = "(none)"
         choice = st.selectbox(
             "Select or create a project",
             all_choices,
-            index=all_choices.index(default_choice),
+            key="project_choice",
         )
-        st.session_state["project_choice"] = choice
 
         if choice == "+ New project":
             new_name = st.text_input("Project name")
