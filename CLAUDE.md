@@ -363,14 +363,46 @@ missing numbers, missing text) — all of create project → save file+records
 → load back → verify round-trip → save both analysis types → list
 projects/files passed. Test rows deleted afterward; Neon is clean.
 
+### UI wiring — done (2026-07-15)
+Sidebar now has: a Project selector (pick existing / create new — the
+create flow explicitly tracks and re-applies the intended selection
+across the rerun, since a plain `st.selectbox()` keeps showing stale
+widget state otherwise), a "📂 Load a saved file" path as an alternative
+to uploading, and a "💾 Save to database" action after processing an
+upload. AI Insights/Classification results persist via `save_analysis()`
+whenever the current data came from a saved/persisted file. All of this
+degrades gracefully — a missing/unreachable `DATABASE_URL` just hides
+these sections rather than crashing the app.
+
+**Bug found and fixed while testing the load path**: records loaded back
+from the database round-trip through JSONB as plain ISO-format date
+strings, not a real datetime dtype. The existing `dayfirst=True` parsing
+(tuned for ambiguous Excel exports) actively corrupts these — confirmed
+it silently turns `"2026-02-01"` into `"2026-01-02"` and drops
+`"2026-01-15"` to `NaT` entirely. Fixed by explicitly parsing DB-loaded
+date columns (via the cached `detected_columns`) without `dayfirst` right
+at the load boundary, before anything else touches them. Verified this
+doesn't get re-corrupted by the existing downstream `dayfirst=True` calls
+elsewhere in the app — re-parsing an already-`datetime64` column is a
+no-op regardless of `dayfirst`, since that flag only affects string
+interpretation.
+
+Verified end-to-end with a synthetic test file (not real data): create
+project → upload → save to database → reload the page → load the saved
+file back → confirm both the data and the date range match the original
+exactly. Test project deleted from Neon afterward.
+
 ### Not yet done
-- Not wired into the Streamlit UI at all yet — `db.py` exists and works,
-  but `app.py` still only processes uploads in-memory per session. Next
-  step is a project-selector UI plus changing the upload flow to persist
-  via `save_file`/`save_analysis` instead of (or alongside) session state.
 - The governance items above (app classification + explicit Neon
-  persistence sign-off) — required before any real data goes in.
-- No read-side UI yet for browsing past projects/files/analyses.
+  persistence sign-off) — still required before any real data goes in.
+  As of 2026-07-15 this remains unresolved — classification attempts in
+  conversation were inconsistent (Open → Closed/Sensitive Normal →
+  Non-Sensitive across three tries) because no actual classification has
+  been done by an authoritative source; needs a real answer from
+  whoever owns data governance, not a guess.
+- No dedicated read-side UI for browsing/comparing across projects or
+  files yet (only load-one-file-at-a-time exists) — cross-file pattern
+  recognition (the original motivation for persistence) isn't built.
 
 ## Optimus API feasibility (investigated, not pursued) (2026-07-15)
 Investigated whether Optimus could be integrated with directly (API pull)
