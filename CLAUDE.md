@@ -547,6 +547,30 @@ delete-dialog opens and removes the file (confirmed gone from Neon),
 project delete-dialog opens and removes the project. Test data cleaned
 up afterward.
 
+## Loaded file is now scoped to its owning project (2026-07-15)
+Bug reported: load a saved file from Project A, then switch the sidebar
+project selector to "(none)" (or to a different project) — the file's
+data (KPIs, tabs, everything) kept showing on screen, with no visible
+indication it belonged to a project no longer selected. There's no
+cross-project comparison feature in this app to justify that as
+intentional persistence — it was just stale state.
+
+Fixed by tagging `st.session_state["loaded_file"]` with the `project_id`
+it was loaded under (set alongside `file_id`/`filename`/`detected_columns`
+when the Manage section's "Load" button is clicked), and clearing
+`loaded_file` whenever the currently selected project no longer matches
+that tag — checked right where `loaded_file_info` is first read, next to
+the existing "a fresh upload clears any loaded file" rule. This only
+applies to files loaded from the database; a fresh upload not yet saved
+is untouched by project-switching, since choosing a destination project
+for an unsaved upload is a normal part of that workflow, not stale state.
+
+Verified with Playwright against two seeded test projects (each with its
+own saved file): loading Project A's file shows it; switching to "(none)"
+clears it and the tabs disappear; loading it again then switching
+straight to Project B also clears it (not just the "(none)" case); B's
+own file still loads normally afterward. Test data cleaned up.
+
 Also worth knowing for anyone building small test fixtures:
 `guess_columns()`'s category-vs-text cardinality threshold is
 `1 < nunique <= max(30, len(df) * 0.5)` — with a 3-row test file, that

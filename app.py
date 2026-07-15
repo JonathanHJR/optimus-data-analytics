@@ -465,6 +465,15 @@ if uploaded is not None:
     st.session_state.pop("loaded_file", None)
 loaded_file_info = st.session_state.get("loaded_file")
 
+# A loaded file belongs to whatever project it was loaded from. If the
+# project selector no longer points at that project (switched to "(none)"
+# or to a different project), clear it — otherwise its data keeps showing
+# with no visible project context for it, which is stale state, not a
+# real cross-project view (nothing here lets you compare across projects).
+if loaded_file_info is not None and loaded_file_info.get("project_id") != selected_project_id:
+    st.session_state.pop("loaded_file", None)
+    loaded_file_info = None
+
 st.title("Optimus Data Analytics Dashboard")
 
 # ---- Manage: project rename/delete, saved-files browse/load/delete ----
@@ -495,6 +504,7 @@ if db_available and selected_project_id:
                     "file_id": f["id"],
                     "filename": f["filename"],
                     "detected_columns": f["detected_columns"],
+                    "project_id": selected_project_id,
                 }
                 st.rerun()
             if fcol4.button("🗑️", key=f"delete_btn_{f['id']}"):
