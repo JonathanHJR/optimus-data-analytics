@@ -3,3 +3,4 @@ pandas
 openpyxl
 plotly
 google-genai
+psycopg2-binary

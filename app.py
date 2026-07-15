@@ -18,6 +18,7 @@ import os
 import time
 from pathlib import Path
 import pandas as pd
+import psycopg2
 import streamlit as st
 import plotly.express as px
 from google import genai
@@ -137,6 +138,17 @@ def get_gemini_client() -> genai.Client | None:
         pass
     api_key = api_key or os.environ.get("GEMINI_API_KEY")
     return genai.Client(api_key=api_key) if api_key else None
+
+
+def get_database_url() -> str | None:
+    """Resolve the Neon connection string the same way as the Gemini API
+    key above: Streamlit secrets first, then the environment."""
+    url = None
+    try:
+        url = st.secrets.get("DATABASE_URL")
+    except Exception:
+        pass
+    return url or os.environ.get("DATABASE_URL")
 
 
 def build_data_summary(df: pd.DataFrame, cols: dict, classification: dict | None = None) -> str:
@@ -341,6 +353,24 @@ def classify_all(client: genai.Client, values: list[str], categories: list[str],
 st.sidebar.title("Optimus Analytics")
 st.sidebar.write("Upload an Excel export from O2 to begin.")
 uploaded = st.sidebar.file_uploader("Excel file (.xlsx)", type=["xlsx", "xls"])
+
+# TEMPORARY — verifying Airbase's network can reach Neon before building any
+# real database feature on top of it. Remove once confirmed either way.
+with st.sidebar.expander("🔌 Database connectivity test"):
+    if st.button("Test Neon connection"):
+        db_url = get_database_url()
+        if not db_url:
+            st.error("No DATABASE_URL found in secrets or environment.")
+        else:
+            try:
+                conn = psycopg2.connect(db_url, connect_timeout=10)
+                cur = conn.cursor()
+                cur.execute("SELECT 1")
+                result = cur.fetchone()[0]
+                conn.close()
+                st.success(f"Connected — SELECT 1 returned {result}")
+            except Exception as e:
+                st.error(f"Connection failed: {e}")
 
 if uploaded is None:
     st.title("Optimus Data Analytics Dashboard")
