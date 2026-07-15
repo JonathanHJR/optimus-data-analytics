@@ -461,6 +461,76 @@ create project → Manage section appears → rename → upload + save file →
 list → delete file (confirm prompt → confirm → gone) → delete project
 (type-to-confirm → gone). Test data cleaned up from Neon afterward.
 
+## Saved insights/classification: restore on load, one-at-a-time (2026-07-15)
+Previously, `save_analysis()` wrote insights/classification to the
+`analyses` table on generation, but nothing ever read them back — loading
+a saved file always started both AI tabs blank, and clicking "Generate"
+again just silently appended another row (no dedupe, no overwrite). Fixed
+both problems together:
+
+- **Restore on load**: `db.py` gained `get_latest_analysis(file_id, type)`
+  (most recent row by `created_at`) and `delete_analyses(file_id, type)`.
+  When a file is loaded from the Manage section, `app.py` now calls
+  `get_latest_analysis` for both types right after `db_file_id` is set,
+  and pre-populates `st.session_state["ai_insights"]` /
+  `["classification"]` if a saved result exists — same session-state keys
+  a fresh generation would have used, so the rest of each tab's logic
+  doesn't need to know whether the data came from Gemini just now or from
+  Neon a week ago.
+- **One at a time, delete-to-regenerate**: both tabs now branch on
+  whether a result already exists in session state. If it does, the tab
+  shows the result plus a "🗑 Delete this insight/classification" button
+  and **hides the generate/propose flow entirely** — regenerating (or
+  classifying a different column) requires deleting the current one
+  first, which also calls `delete_analyses()` so it's actually gone from
+  Neon, not just hidden client-side. This replaces the old behaviour of
+  letting a fresh generate silently pile up duplicate `analyses` rows for
+  the same file.
+
+**Bug found and fixed while wiring this up**: the classification tab's
+"1. Propose categories" step used to explicitly pop `st.session_state["classification"]`
+on a fresh proposal (to invalidate stale labels tied to an old taxonomy).
+That's now dead code/unreachable — the propose/run flow is only ever shown
+when no classification exists in the first place — so it was removed
+rather than left as defensive dead code.
+
+**Bug found and fixed**: after restructuring both tabs into
+show-existing-or-show-generate branches, a fresh "Generate"/"Run
+classification" no longer displayed its own result in the same run (the
+old code fell through unconditionally into a display block after
+generating; the new code is in an `else` branch that a `elif` won't
+re-enter on the same pass). Fixed by adding `st.rerun()` right after a
+successful generate/classify+save, matching the same rerun-for-freshness
+pattern already used for the Manage section's save-to-database action.
+
+Verified with two Playwright passes: (1) a live-Gemini run confirming
+Generate/Propose buttons disappear and Delete buttons appear immediately
+after a real generate/classify; (2) a seeded-data run (bypassing Gemini
+entirely, via direct `db.save_analysis()` calls in a Python script, to
+avoid stacking live API rate-limit retries across repeated test runs)
+confirming restore-on-load shows the right content with the right tabs
+gated, and that deleting actually removes the row from Neon (checked via
+`db.get_latest_analysis()` returning `None` afterward) and brings the
+generate/propose flow back. Test data cleaned up afterward both times.
+
+## Empty-state message and column detection at small row counts
+The empty-state info message (shown before any file is uploaded/loaded)
+was kept, not removed — it's the only explanation a first-time user gets
+of what the app actually does (generic column detection → AI
+interpretation), and removing it would leave nothing but a bare stop.
+Reworded slightly to point at the Manage section by name instead of a
+vague "above", since the sidebar's old "load a saved file" dropdown no
+longer exists.
+
+Also worth knowing for anyone building small test fixtures:
+`guess_columns()`'s category-vs-text cardinality threshold is
+`1 < nunique <= max(30, len(df) * 0.5)` — with a 3-row test file, that
+upper bound is `max(30, 1.5) = 30`, so almost any column (even genuine
+free text) gets classified as "category," not "text," and won't show up
+in AI Classification's eligible-columns list. Test fixtures for anything
+touching classification need enough rows (40+ with genuinely distinct
+values worked) for the free-text column to exceed that threshold.
+
 ## Optimus API feasibility (investigated, not pursued) (2026-07-15)
 Investigated whether Optimus could be integrated with directly (API pull)
 instead of manual Excel export, to remove the human export-then-upload

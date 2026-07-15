@@ -113,6 +113,33 @@ def save_analysis(file_id: int, analysis_type: str, result) -> int:
         return analysis_id
 
 
+def get_latest_analysis(file_id: int, analysis_type: str) -> dict | list | None:
+    """Return the most recent saved analysis result of this type for a
+    file, or None if none exists yet. Callers unwrap the shape themselves:
+    "insights" results are {"text": ...}, "classification" results are
+    {"column": ..., "categories": ..., "labels": [...]}."""
+    with get_connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT result FROM analyses WHERE file_id = %s AND type = %s "
+            "ORDER BY created_at DESC LIMIT 1",
+            (file_id, analysis_type),
+        )
+        row = cur.fetchone()
+        return row[0] if row else None
+
+
+def delete_analyses(file_id: int, analysis_type: str) -> None:
+    """Deletes every saved analysis of this type for a file — used to
+    clear the way for a fresh regenerate, since only one "current" result
+    per type is kept at a time."""
+    with get_connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM analyses WHERE file_id = %s AND type = %s",
+            (file_id, analysis_type),
+        )
+        conn.commit()
+
+
 def list_files(project_id: int) -> list[dict]:
     with get_connection() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(

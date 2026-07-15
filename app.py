@@ -499,7 +499,8 @@ if db_available and selected_project_id:
 if uploaded is None and loaded_file_info is None:
     st.info(
         "👈 Upload an Optimus Excel export in the sidebar to get started, "
-        "or load a saved file above if you have a project selected.\n\n"
+        "or pick a project and load a saved file from the Manage section "
+        "above.\n\n"
         "Works with any Optimus export form — this app auto-detects date, "
         "status, and category columns generically and shows a quick "
         "aggregate overview, then lets AI Insights do the actual "
@@ -561,6 +562,19 @@ if st.session_state.get("data_identity") != data_identity:
     st.session_state["data_identity"] = data_identity
     if loaded_file_info is not None:
         st.session_state["db_file_id"] = loaded_file_info["file_id"]
+        # A file loaded from the database may already have a saved
+        # analysis from a previous session — restore it so the tabs show
+        # what was generated before instead of coming up blank every time.
+        saved_insights = db.get_latest_analysis(loaded_file_info["file_id"], "insights")
+        if saved_insights is not None:
+            st.session_state["ai_insights"] = saved_insights["text"]
+        saved_classification = db.get_latest_analysis(loaded_file_info["file_id"], "classification")
+        if saved_classification is not None:
+            st.session_state["classification"] = {
+                "column": saved_classification["column"],
+                "categories": saved_classification["categories"],
+                "labels": pd.Series(saved_classification["labels"], index=df.index),
+            }
 
 if db_available and selected_project_id and data_identity[0] == "upload" and "db_file_id" not in st.session_state:
     with st.sidebar.expander("💾 Save to database"):
@@ -642,6 +656,23 @@ with tab_ai:
             "`.streamlit/secrets.toml` locally, or under the app's "
             "Settings -> Secrets on Streamlit Cloud, to enable this tab."
         )
+    elif "ai_insights" in st.session_state:
+        # An insight already exists (freshly generated, or restored from a
+        # saved file) — show it and require an explicit delete before a
+        # new one can be generated, rather than silently overwriting or
+        # piling up duplicate saved analyses for the same file.
+        st.markdown(st.session_state["ai_insights"])
+        st.download_button(
+            "Download AI Insights (Markdown)",
+            st.session_state["ai_insights"].encode("utf-8"),
+            "ai_insights.md",
+            "text/markdown",
+        )
+        if st.button("🗑 Delete this insight"):
+            st.session_state.pop("ai_insights", None)
+            if "db_file_id" in st.session_state:
+                db.delete_analyses(st.session_state["db_file_id"], "insights")
+            st.rerun()
     else:
         classification = st.session_state.get("classification")
         if classification:
@@ -665,16 +696,9 @@ with tab_ai:
                     st.session_state["ai_insights"] = generate_ai_insights(client, summary_text)
                     if "db_file_id" in st.session_state:
                         db.save_analysis(st.session_state["db_file_id"], "insights", st.session_state["ai_insights"])
+                    st.rerun()
                 except genai.errors.APIError as e:
                     st.error(f"AI request failed: {e}")
-        if "ai_insights" in st.session_state:
-            st.markdown(st.session_state["ai_insights"])
-            st.download_button(
-                "Download AI Insights (Markdown)",
-                st.session_state["ai_insights"].encode("utf-8"),
-                "ai_insights.md",
-                "text/markdown",
-            )
 
 # ---- AI Classification: per-row categorisation of a free-text column ----
 # Distinct from AI Insights above: that tab summarises the data in prose.
@@ -691,97 +715,108 @@ with tab_classify:
             "Settings -> Secrets on Streamlit Cloud, to enable this tab."
         )
     else:
-        # Same "genuine free text, not IDs/serials" heuristic already used
-        # for AI Insights sampling — average of 3+ words per value.
-        eligible_cols = [
-            col for col in cols["text"]
-            if not df[col].dropna().empty
-            and df[col].dropna().astype(str).str.split().str.len().mean() >= 3
-        ]
-        if not eligible_cols:
-            st.caption("No free-text columns detected to classify.")
-        else:
-            target_col = st.selectbox("Column to classify", eligible_cols)
+        existing_classification = st.session_state.get("classification")
+        if existing_classification:
+            # A classification already exists (freshly generated, or
+            # restored from a saved file) — show it and require an
+            # explicit delete before classifying again, whether that's a
+            # re-run of the same column or a switch to a different one.
+            labeled_df = df.copy()
+            labeled_df["AI Category"] = existing_classification["labels"]
             st.caption(
-                "Step 1: Gemini proposes a short set of categories from a "
-                "sample of this column — no predefined list, so this works "
-                "for any Optimus form's free-text field. Review/edit them, "
-                "then run classification against the confirmed list."
+                f"Classified column: **{existing_classification['column']}**. "
+                "Categories Gemini proposed: "
+                + ", ".join(existing_classification["categories"])
             )
-
-            if st.button("1. Propose categories"):
-                values = df[target_col].dropna().astype(str)
-                with st.spinner("Asking Gemini to propose categories..."):
-                    try:
-                        sample_size = min(30, len(values))
-                        sample = values.sample(sample_size, random_state=0).tolist()
-                        st.session_state["taxonomy"] = {
-                            "column": target_col,
-                            "categories": induce_taxonomy(client, sample),
-                        }
-                        # A fresh taxonomy invalidates any previous run's
-                        # classification, since labels were assigned against
-                        # the old category list.
-                        st.session_state.pop("classification", None)
-                    except (genai.errors.APIError, json.JSONDecodeError) as e:
-                        st.error(f"Category proposal failed: {e}")
-
-            taxonomy = st.session_state.get("taxonomy")
-            if taxonomy and taxonomy["column"] == target_col:
-                st.write("**Proposed categories** — edit below if needed, one per line:")
-                edited = st.text_area(
-                    "Categories", value="\n".join(taxonomy["categories"]),
-                    height=160, label_visibility="collapsed",
+            with st.container(border=True):
+                st.plotly_chart(
+                    bar_of_counts(
+                        labeled_df, "AI Category",
+                        f"AI-classified categories for '{existing_classification['column']}'",
+                    ),
+                    width="stretch",
                 )
-                confirmed_categories = [c.strip() for c in edited.split("\n") if c.strip()]
-
-                if st.button("2. Run classification with these categories"):
-                    values = df[target_col].dropna().astype(str)
-                    progress = st.progress(0.0)
-                    with st.spinner("Classifying with Gemini..."):
-                        try:
-                            labels = classify_all(
-                                client, values.tolist(), confirmed_categories,
-                                progress_callback=progress.progress,
-                            )
-                            result = pd.Series("(no text)", index=df.index)
-                            result.loc[values.index] = labels
-                            st.session_state["classification"] = {
-                                "column": target_col,
-                                "labels": result,
-                                "categories": confirmed_categories,
-                            }
-                            if "db_file_id" in st.session_state:
-                                db.save_analysis(st.session_state["db_file_id"], "classification", {
-                                    "column": target_col,
-                                    "categories": confirmed_categories,
-                                    "labels": result.tolist(),
-                                })
-                        except (genai.errors.APIError, json.JSONDecodeError) as e:
-                            st.error(f"AI classification failed: {e}")
-                    progress.empty()
-
-            classification = st.session_state.get("classification")
-            if classification and classification["column"] == target_col:
-                labeled_df = df.copy()
-                labeled_df["AI Category"] = classification["labels"]
+            st.download_button(
+                "Download classified data (CSV)",
+                labeled_df.to_csv(index=False).encode("utf-8"),
+                "optimus_classified.csv",
+                "text/csv",
+            )
+            if st.button("🗑 Delete this classification"):
+                st.session_state.pop("classification", None)
+                st.session_state.pop("taxonomy", None)
+                if "db_file_id" in st.session_state:
+                    db.delete_analyses(st.session_state["db_file_id"], "classification")
+                st.rerun()
+        else:
+            # Same "genuine free text, not IDs/serials" heuristic already used
+            # for AI Insights sampling — average of 3+ words per value.
+            eligible_cols = [
+                col for col in cols["text"]
+                if not df[col].dropna().empty
+                and df[col].dropna().astype(str).str.split().str.len().mean() >= 3
+            ]
+            if not eligible_cols:
+                st.caption("No free-text columns detected to classify.")
+            else:
+                target_col = st.selectbox("Column to classify", eligible_cols)
                 st.caption(
-                    "Categories Gemini proposed: " + ", ".join(classification["categories"])
+                    "Step 1: Gemini proposes a short set of categories from a "
+                    "sample of this column — no predefined list, so this works "
+                    "for any Optimus form's free-text field. Review/edit them, "
+                    "then run classification against the confirmed list."
                 )
-                with st.container(border=True):
-                    st.plotly_chart(
-                        bar_of_counts(
-                            labeled_df, "AI Category",
-                            f"AI-classified categories for '{target_col}'",
-                        ),
-                        width="stretch",
+
+                if st.button("1. Propose categories"):
+                    values = df[target_col].dropna().astype(str)
+                    with st.spinner("Asking Gemini to propose categories..."):
+                        try:
+                            sample_size = min(30, len(values))
+                            sample = values.sample(sample_size, random_state=0).tolist()
+                            st.session_state["taxonomy"] = {
+                                "column": target_col,
+                                "categories": induce_taxonomy(client, sample),
+                            }
+                        except (genai.errors.APIError, json.JSONDecodeError) as e:
+                            st.error(f"Category proposal failed: {e}")
+
+                taxonomy = st.session_state.get("taxonomy")
+                if taxonomy and taxonomy["column"] == target_col:
+                    st.write("**Proposed categories** — edit below if needed, one per line:")
+                    edited = st.text_area(
+                        "Categories", value="\n".join(taxonomy["categories"]),
+                        height=160, label_visibility="collapsed",
                     )
-                st.download_button(
-                    "Download classified data (CSV)",
-                    labeled_df.to_csv(index=False).encode("utf-8"),
-                    "optimus_classified.csv",
-                    "text/csv",
-                )
+                    confirmed_categories = [c.strip() for c in edited.split("\n") if c.strip()]
+
+                    if st.button("2. Run classification with these categories"):
+                        values = df[target_col].dropna().astype(str)
+                        progress = st.progress(0.0)
+                        with st.spinner("Classifying with Gemini..."):
+                            try:
+                                labels = classify_all(
+                                    client, values.tolist(), confirmed_categories,
+                                    progress_callback=progress.progress,
+                                )
+                                result = pd.Series("(no text)", index=df.index)
+                                result.loc[values.index] = labels
+                                st.session_state["classification"] = {
+                                    "column": target_col,
+                                    "labels": result,
+                                    "categories": confirmed_categories,
+                                }
+                                st.session_state.pop("taxonomy", None)
+                                if "db_file_id" in st.session_state:
+                                    db.save_analysis(st.session_state["db_file_id"], "classification", {
+                                        "column": target_col,
+                                        "categories": confirmed_categories,
+                                        "labels": result.tolist(),
+                                    })
+                                progress.empty()
+                                st.rerun()
+                            except (genai.errors.APIError, json.JSONDecodeError) as e:
+                                progress.empty()
+                                st.error(f"AI classification failed: {e}")
 
 # ---- Raw data + detected schema ----
 with tab_raw:
