@@ -513,7 +513,7 @@ with st.container(border=True):
             )
     with ctrl_col2:
         if db_available:
-            if st.button("+ New project"):
+            if st.button("+ New project", type="primary"):
                 new_project_dialog()
     with ctrl_col3:
         uploaded = st.file_uploader("Upload Excel export", type=["xlsx", "xls"])
@@ -545,9 +545,11 @@ with st.container(border=True):
         # Plain bold text, not st.subheader — this is a per-project label
         # inside an otherwise compact control panel, not a section heading.
         header_col.markdown(f"**📁 {current_project['name']}**")
-        if rename_col.button("Rename", key=f"open_rename_{selected_project_id}"):
+        # tertiary: de-emphasized management actions, vs. the primary "Load"
+        # below that's the actual thing you come to this panel to do.
+        if rename_col.button("Rename", key=f"open_rename_{selected_project_id}", type="tertiary"):
             rename_project_dialog(current_project)
-        if delete_col.button("Delete", key=f"open_delete_proj_{selected_project_id}"):
+        if delete_col.button("Delete", key=f"open_delete_proj_{selected_project_id}", type="tertiary"):
             delete_project_dialog(current_project)
 
         saved_files = cached_list_files(selected_project_id)
@@ -556,7 +558,7 @@ with st.container(border=True):
             fcol1, fcol2, fcol3, fcol4 = st.columns([3, 2, 1, 1], vertical_alignment="center")
             fcol1.write(f["filename"])
             fcol2.caption(f"{f['form_type']} · {f['uploaded_at']:%Y-%m-%d %H:%M}")
-            if fcol3.button("Load", key=f"load_{f['id']}"):
+            if fcol3.button("Load", key=f"load_{f['id']}", type="primary"):
                 st.session_state["loaded_file"] = {
                     "file_id": f["id"],
                     "filename": f["filename"],
@@ -566,7 +568,7 @@ with st.container(border=True):
                 st.rerun()
             # Text, not a bare icon — matches the Rename/Delete convention
             # used one row up for the project itself.
-            if fcol4.button("Delete", key=f"delete_btn_{f['id']}"):
+            if fcol4.button("Delete", key=f"delete_btn_{f['id']}", type="tertiary"):
                 delete_file_dialog(f)
 
 if uploaded is None and loaded_file_info is None:
@@ -645,7 +647,7 @@ if db_available and selected_project_id and data_identity[0] == "upload" and "db
     with save_col1:
         form_type = st.text_input("Save to database as", value=Path(filename).stem)
     with save_col2:
-        if st.button("💾 Save", use_container_width=True):
+        if st.button("💾 Save", use_container_width=True, type="primary"):
             file_id = db.save_file(selected_project_id, form_type, filename, cols, df)
             cached_list_files.clear()
             st.session_state["db_file_id"] = file_id
@@ -735,7 +737,7 @@ with tab_ai:
             "ai_insights.md",
             "text/markdown",
         )
-        if st.button("🗑 Delete this insight"):
+        if st.button("🗑 Delete this insight", type="tertiary"):
             st.session_state.pop("ai_insights", None)
             if "db_file_id" in st.session_state:
                 db.delete_analyses(st.session_state["db_file_id"], "insights")
@@ -756,7 +758,7 @@ with tab_ai:
                 "Run AI Classification first (see that tab) to also fold "
                 "AI-derived categories into this summary."
             )
-        if st.button("Generate AI Insights"):
+        if st.button("Generate AI Insights", type="primary"):
             with st.spinner("Asking Gemini..."):
                 summary_text = build_data_summary(df, cols, classification)
                 try:
@@ -809,7 +811,7 @@ with tab_classify:
                 "optimus_classified.csv",
                 "text/csv",
             )
-            if st.button("🗑 Delete this classification"):
+            if st.button("🗑 Delete this classification", type="tertiary"):
                 st.session_state.pop("classification", None)
                 st.session_state.pop("taxonomy", None)
                 if "db_file_id" in st.session_state:
@@ -834,7 +836,7 @@ with tab_classify:
                     "then run classification against the confirmed list."
                 )
 
-                if st.button("1. Propose categories"):
+                if st.button("1. Propose categories", type="primary"):
                     values = df[target_col].dropna().astype(str)
                     with st.spinner("Asking Gemini to propose categories..."):
                         try:
@@ -856,7 +858,7 @@ with tab_classify:
                     )
                     confirmed_categories = [c.strip() for c in edited.split("\n") if c.strip()]
 
-                    if st.button("2. Run classification with these categories"):
+                    if st.button("2. Run classification with these categories", type="primary"):
                         values = df[target_col].dropna().astype(str)
                         progress = st.progress(0.0)
                         with st.spinner("Classifying with Gemini..."):

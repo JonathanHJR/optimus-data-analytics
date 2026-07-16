@@ -4,12 +4,17 @@ gatherUsageStats = false
 [theme]
 primaryColor = "#0B5394"
 backgroundColor = "#FFFFFF"
-secondaryBackgroundColor = "#EAF1F8"
+# A touch richer than the previous #EAF1F8 — that was so pale it barely
+# read as blue at all, leaving every widget surface (uploader box,
+# dropdowns, dataframe headers) nearly indistinguishable from plain white.
+secondaryBackgroundColor = "#DCE9F5"
 textColor = "#1A1A1A"
 font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
 headingFont = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
-baseRadius = "0.5rem"
-dataframeHeaderBackgroundColor = "#EAF1F8"
+# Softer corners than the previous 0.5rem — a small change, but combined
+# with the button-type hierarchy below it reads less like a bare wireframe.
+baseRadius = "0.75rem"
+dataframeHeaderBackgroundColor = "#DCE9F5"
 metricValueFontWeight = 700
 
 # Widget borders + a branded border color — previously unset, so every

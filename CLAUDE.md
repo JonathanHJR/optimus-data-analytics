@@ -774,6 +774,38 @@ row count and filename displayed correctly regardless of load order or
 how many unrelated reruns happened in between. Test data cleaned up
 afterward.
 
+## Visual hierarchy via button type, not just palette (2026-07-16)
+User asked for an honest opinion on the current colors, then to make it
+more aesthetic. Fair critique: the palette itself was already accessible
+and validated (see the earlier color-polish entry), but the page was
+still almost entirely white/black/gray — every button (Load, Rename,
+Delete, +New project, Save, Generate, Propose/Run) looked visually
+identical regardless of importance, so nothing guided the eye and it read
+as a generic wireframe.
+
+Fixed mainly with `st.button(..., type=...)` — Streamlit has three native
+button types (`primary`/`secondary`/`tertiary`; `tertiary` renders as
+plain text with no border/fill, confirmed via `inspect.signature`).
+Applied a consistent rule across the whole app: **primary** (filled,
+navy) for the one forward-moving action per context — "+ New project",
+"Load", "💾 Save", "Generate AI Insights", "1. Propose categories", "2.
+Run classification..." — and **tertiary** (ghost/plain-text, de-emphasized)
+for secondary/management actions — "Rename", "Delete" (both project- and
+file-level triggers on the main page; the confirm buttons *inside* the
+delete dialogs stay primary, since at that point deleting is the thing
+you came to do), "🗑 Delete this insight/classification". Also two small
+`config.toml` refinements: `secondaryBackgroundColor` deepened from
+`#EAF1F8` to `#DCE9F5` (the old value was so pale it barely read as blue
+on widget surfaces like the uploader box and dropdowns), and `baseRadius`
+softened from `0.5rem` to `0.75rem`.
+
+Verified visually via Playwright screenshots (empty state, loaded-data
+state, AI Classification tab) — primary actions now clearly pop against
+the de-emphasized Rename/Delete text-buttons — and re-ran the full
+create/rename/upload/delete-file/delete-project dialog flow to confirm
+none of this affected actual behavior (button `type` is purely visual).
+Test data cleaned up afterward.
+
 ## Optimus API feasibility (investigated, not pursued) (2026-07-15)
 Investigated whether Optimus could be integrated with directly (API pull)
 instead of manual Excel export, to remove the human export-then-upload
