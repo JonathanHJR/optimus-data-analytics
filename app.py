@@ -126,15 +126,83 @@ def guess_columns(df: pd.DataFrame) -> dict[str, list[str]]:
     }
 
 
-def bar_of_counts(df, col, title, top_n=15):
-    """Horizontal bar chart of value counts for a categorical column."""
-    counts = df[col].value_counts(dropna=False).head(top_n).reset_index()
-    counts.columns = [col, "Count"]
+def bar_of_series(counts: pd.Series, title: str, top_n: int = 15):
+    """Horizontal bar chart from an already-computed value_counts Series —
+    factored out of bar_of_counts so the Portfolio view can build the same
+    chart from counts combined across multiple files, which never existed
+    as one single DataFrame column to run value_counts() on directly."""
+    counts = counts.head(top_n)
+    plot_df = counts.reset_index()
+    plot_df.columns = ["Label", "Count"]
     fig = px.bar(
-        counts, x="Count", y=col, orientation="h", title=title, text="Count",
+        plot_df, x="Count", y="Label", orientation="h", title=title, text="Count",
         color_discrete_sequence=[CHART_ACCENT_COLOR],
     )
     fig.update_layout(yaxis={"categoryorder": "total ascending"}, height=400)
+    annotate_outliers(fig, counts, orientation="h")
+    return fig
+
+
+def bar_of_counts(df, col, title, top_n=15):
+    """Horizontal bar chart of value counts for a categorical column."""
+    counts_series = df[col].value_counts(dropna=False)
+    return bar_of_series(counts_series, title, top_n)
+
+
+def trend_chart(df: pd.DataFrame, date_col: str, title: str):
+    """Line chart of record counts bucketed over time — previously nothing
+    in this app showed whether issues were increasing or decreasing, only
+    a static "Date range: X to Y" caption. Bucket width adapts to the span
+    (daily for a couple of weeks, weekly for a few months, monthly beyond
+    that) so a single-week upload doesn't render as one flat monthly dot,
+    and a year of data doesn't render as 365 daily bars."""
+    dates = pd.to_datetime(df[date_col], errors="coerce", dayfirst=True).dropna()
+    if dates.empty:
+        return None
+    span_days = (dates.max() - dates.min()).days
+    freq = "D" if span_days <= 14 else ("W" if span_days <= 120 else "ME")
+    periods = dates.dt.to_period(freq).dt.to_timestamp()
+    counts = periods.value_counts().sort_index()
+    if len(counts) < 2:
+        return None
+    fig = px.line(
+        x=counts.index, y=counts.values, title=title, markers=True,
+        labels={"x": "Date", "y": "Count"},
+    )
+    fig.update_traces(line_color=CHART_ACCENT_COLOR, marker_color=CHART_ACCENT_COLOR)
+    fig.update_layout(height=350)
+    annotate_outliers(fig, counts, orientation="v")
+    return fig
+
+
+def flag_outliers(counts: pd.Series, min_points: int = 4) -> set:
+    """Labels whose count is unusually high relative to the others in this
+    same series (mean + 1.5×std) — a simple, explainable spike detector,
+    not a rigorous statistical test. Returns nothing if there aren't
+    enough data points for "usual" to mean anything yet."""
+    if len(counts) < min_points:
+        return set()
+    threshold = counts.mean() + 1.5 * counts.std()
+    return set(counts[counts > threshold].index)
+
+
+def annotate_outliers(fig, counts: pd.Series, orientation: str = "v"):
+    """Marks outlier bars/points with a small warning annotation, not a
+    recolor — per the dataviz principle that flagged meaning should carry
+    a direct label, not rely on color alone. Uses the theme's redColor so
+    it's visually consistent with this app's other semantic-color usage."""
+    for label in flag_outliers(counts):
+        value = counts[label]
+        if orientation == "h":
+            fig.add_annotation(
+                x=value, y=label, text="⚠ spike", showarrow=False,
+                xanchor="left", xshift=8, font=dict(size=11, color="#D03B3B"),
+            )
+        else:
+            fig.add_annotation(
+                x=label, y=value, text="⚠ spike", showarrow=True, arrowhead=2,
+                ax=0, ay=-30, font=dict(size=11, color="#D03B3B"),
+            )
     return fig
 
 
@@ -143,6 +211,85 @@ def kpi_row(df, cols):
     c1.metric("Total records", len(df), border=True)
     c2.metric("Columns", df.shape[1], border=True)
     c3.metric("Date fields detected", len(cols["date"]), border=True)
+
+
+def render_portfolio(project_id: int):
+    """Aggregated cross-file view. Every tab elsewhere in this app only
+    ever shows one loaded file at a time, even though a project can hold
+    many — this pools status/category counts, a combined time trend, and
+    combined AI-classified categories (when files share a saved taxonomy)
+    across every file saved to the project. Different files can have
+    entirely different column names (Optimus form types don't share a
+    schema), so this pools by *role* (each file's own detected status/
+    category/date column), not by column name."""
+    saved_files = cached_list_files(project_id)
+    if not saved_files:
+        st.info("No files saved to this project yet.")
+        return
+
+    all_status, all_category, all_dates = [], [], []
+    total_records = 0
+    for f in saved_files:
+        file_df = cached_load_file_records(f["id"])
+        total_records += len(file_df)
+        file_cols = f["detected_columns"] or {}
+        if file_cols.get("status"):
+            all_status.extend(file_df[file_cols["status"][0]].dropna().astype(str).tolist())
+        if file_cols.get("category"):
+            all_category.extend(file_df[file_cols["category"][0]].dropna().astype(str).tolist())
+        if file_cols.get("date"):
+            parsed = pd.to_datetime(file_df[file_cols["date"][0]], errors="coerce")
+            all_dates.extend(parsed.dropna().tolist())
+
+    p1, p2, p3 = st.columns(3)
+    p1.metric("Files in project", len(saved_files), border=True)
+    p2.metric("Total records (all files)", total_records, border=True)
+    p3.metric("Records with a detected date", len(all_dates), border=True)
+    if all_dates:
+        st.caption(f"Combined date range: {min(all_dates).date()} to {max(all_dates).date()}")
+
+    if all_dates:
+        trend_df = pd.DataFrame({"__date__": all_dates})
+        fig = trend_chart(trend_df, "__date__", "Records over time (all files combined)")
+        if fig is not None:
+            with st.container(border=True):
+                st.plotly_chart(fig, width="stretch")
+
+    if all_status:
+        with st.container(border=True):
+            st.plotly_chart(
+                bar_of_series(pd.Series(all_status).value_counts(), "Status, combined across all files"),
+                width="stretch",
+            )
+    if all_category:
+        with st.container(border=True):
+            st.plotly_chart(
+                bar_of_series(pd.Series(all_category).value_counts(), "Category, combined across all files"),
+                width="stretch",
+            )
+    if not all_status and not all_category and not all_dates:
+        st.caption("None of the saved files have detected status/category/date columns to aggregate.")
+
+    classifications = db.get_project_classifications(project_id)
+    all_labels = []
+    for c in classifications:
+        all_labels.extend(c["result"].get("labels", []))
+    if all_labels:
+        st.divider()
+        st.write(
+            f"**AI-classified categories** (combined across "
+            f"{len(classifications)} file(s) with a saved classification)"
+        )
+        with st.container(border=True):
+            st.plotly_chart(
+                bar_of_series(pd.Series(all_labels).value_counts(), "AI-classified categories, all files"),
+                width="stretch",
+            )
+    else:
+        st.caption(
+            "No files in this project have a saved AI Classification yet — "
+            "run it on a loaded file to see aggregated categories here."
+        )
 
 
 AI_SYSTEM_PROMPT = """You are an analyst reviewing data exported from \
@@ -366,6 +513,69 @@ def classify_all(client: genai.Client, values: list[str], categories: list[str],
     return all_labels
 
 
+def induce_extraction_fields(client: genai.Client, samples: list[str], max_fields: int = 6) -> list[str]:
+    """Propose a short set of structured field names worth pulling out of
+    free-text values — same rationale as induce_taxonomy: induced from the
+    data itself rather than hardcoded, so it works for any Optimus form's
+    free-text field. Distinct from classification: this pulls out several
+    named attributes per row (e.g. location, severity, responsible trade),
+    not one category label."""
+    prompt = (
+        f"Here are {len(samples)} free-text entries from a JTC Optimus "
+        "project export:\n\n" + "\n".join(f"- {s}" for s in samples) +
+        f"\n\nPropose a fixed list of at most {max_fields} short, structured "
+        "field names (snake_case, 1-3 words) worth extracting from entries "
+        "like these — e.g. a location, a severity level, a responsible "
+        "trade/party, a defect type — whatever attributes are actually "
+        "mentioned in the text, not generic labels. Respond as a JSON array "
+        "of strings only."
+    )
+    fields = _call_gemini_json(client, prompt, max_output_tokens=256)
+    return [str(f) for f in fields][:max_fields]
+
+
+def extract_batch(client: genai.Client, texts: list[str], fields: list[str]) -> list[dict]:
+    """Extract `fields` from a batch of free-text entries. Returns one dict
+    per input text (missing/not-mentioned fields become None), same
+    order/length as `texts`."""
+    numbered = "\n".join(f"{i}: {t}" for i, t in enumerate(texts))
+    prompt = (
+        f"Fields to extract: {', '.join(fields)}\n\n"
+        "For each numbered entry below, extract these fields from the "
+        "text. If a field isn't mentioned or can't be determined, use "
+        "null. Keep extracted values short (a few words).\n\n"
+        f"{numbered}\n\n"
+        'Respond as a JSON array of {"index": <int>, "values": '
+        '{<field>: <value>, ...}} objects, one per entry, in any order.'
+    )
+    results = _call_gemini_json(client, prompt, max_output_tokens=3072)
+    extracted = [{field: None for field in fields} for _ in texts]
+    for item in results:
+        idx = item.get("index")
+        if isinstance(idx, int) and 0 <= idx < len(texts):
+            values = item.get("values", {})
+            for field in fields:
+                if field in values:
+                    extracted[idx][field] = values[field]
+    return extracted
+
+
+def extract_all(client, values: list[str], fields: list[str], batch_size: int = 20, progress_callback=None) -> list[dict]:
+    """Extract every value's fields — same batching/pacing rationale as
+    classify_all, but a smaller batch size: each row now returns a whole
+    dict of fields instead of one label, using more output tokens per row
+    for the same call."""
+    batches = [values[i:i + batch_size] for i in range(0, len(values), batch_size)]
+    all_extracted: list[dict] = []
+    for i, batch in enumerate(batches):
+        all_extracted.extend(extract_batch(client, batch, fields))
+        if progress_callback:
+            progress_callback((i + 1) / len(batches))
+        if i < len(batches) - 1:
+            time.sleep(3)
+    return all_extracted
+
+
 # ----------------------------------------------------------------------
 # Sidebar — project selection, upload, and database load/save
 # ----------------------------------------------------------------------
@@ -518,9 +728,12 @@ with st.container(border=True):
     with ctrl_col3:
         uploaded = st.file_uploader("Upload Excel export", type=["xlsx", "xls"])
 
-    # A fresh upload always takes precedence over a previously loaded saved file.
+    # A fresh upload always takes precedence over a previously loaded saved
+    # file or the portfolio view — otherwise the upload would silently sit
+    # unprocessed behind whichever of those two was showing.
     if uploaded is not None:
         st.session_state.pop("loaded_file", None)
+        st.session_state.pop("portfolio_mode", None)
     loaded_file_info = st.session_state.get("loaded_file")
 
     # A loaded file belongs to whatever project it was loaded from. If the
@@ -565,11 +778,27 @@ with st.container(border=True):
                     "detected_columns": f["detected_columns"],
                     "project_id": selected_project_id,
                 }
+                st.session_state.pop("portfolio_mode", None)
                 st.rerun()
             # Text, not a bare icon — matches the Rename/Delete convention
             # used one row up for the project itself.
             if fcol4.button("Delete", key=f"delete_btn_{f['id']}", type="tertiary"):
                 delete_file_dialog(f)
+
+        if saved_files:
+            if st.button("📊 View portfolio (aggregate all files)"):
+                st.session_state["portfolio_mode"] = True
+                st.session_state.pop("loaded_file", None)
+                st.rerun()
+
+if st.session_state.get("portfolio_mode") and db_available and selected_project_id:
+    portfolio_project_name = next((p["name"] for p in projects if p["id"] == selected_project_id), "?")
+    st.subheader(f"📊 Portfolio: {portfolio_project_name}")
+    if st.button("← Back to a single file", type="tertiary"):
+        st.session_state.pop("portfolio_mode", None)
+        st.rerun()
+    render_portfolio(selected_project_id)
+    st.stop()
 
 if uploaded is None and loaded_file_info is None:
     st.stop()
@@ -617,13 +846,15 @@ else:
     filename = uploaded.name
     data_identity = ("upload", uploaded.name, uploaded.size)
 
-# AI Insights/Classification are tied to whatever data was last analysed —
-# clear them whenever the underlying data changes (new upload or a
-# different saved file loaded) so a stale analysis never lingers on screen.
+# AI Insights/Classification/Extraction are tied to whatever data was last
+# analysed — clear them whenever the underlying data changes (new upload or
+# a different saved file loaded) so a stale analysis never lingers on screen.
 if st.session_state.get("data_identity") != data_identity:
     st.session_state.pop("ai_insights", None)
     st.session_state.pop("taxonomy", None)
     st.session_state.pop("classification", None)
+    st.session_state.pop("extraction_fields_proposal", None)
+    st.session_state.pop("extraction", None)
     st.session_state.pop("db_file_id", None)
     st.session_state["data_identity"] = data_identity
     if loaded_file_info is not None:
@@ -640,6 +871,13 @@ if st.session_state.get("data_identity") != data_identity:
                 "column": saved_classification["column"],
                 "categories": saved_classification["categories"],
                 "labels": pd.Series(saved_classification["labels"], index=df.index),
+            }
+        saved_extraction = db.get_latest_analysis(loaded_file_info["file_id"], "extraction")
+        if saved_extraction is not None:
+            st.session_state["extraction"] = {
+                "column": saved_extraction["column"],
+                "fields": saved_extraction["fields"],
+                "extracted": pd.Series(saved_extraction["extracted"], index=df.index),
             }
 
 if db_available and selected_project_id and data_identity[0] == "upload" and "db_file_id" not in st.session_state:
@@ -687,8 +925,8 @@ if cols["category"]:
 # ----------------------------------------------------------------------
 # Tabs
 # ----------------------------------------------------------------------
-tab_overview, tab_ai, tab_classify, tab_raw = st.tabs(
-    ["📊 Overview", "🤖 AI Insights", "🏷️ AI Classification", "🗂 Raw Data"]
+tab_overview, tab_ai, tab_classify, tab_extract, tab_raw = st.tabs(
+    ["📊 Overview", "🤖 AI Insights", "🏷️ AI Classification", "🔍 AI Extraction", "🗂 Raw Data"]
 )
 
 # ---- Overview: generic aggregate counts, no per-form business logic ----
@@ -699,6 +937,11 @@ with tab_overview:
         "detected — no form-specific formulas. For actual interpretation, "
         "see the AI Insights tab."
     )
+    if cols["date"]:
+        trend_fig = trend_chart(df, cols["date"][0], f"Records over time ({cols['date'][0]})")
+        if trend_fig is not None:
+            with st.container(border=True):
+                st.plotly_chart(trend_fig, width="stretch")
     if cols["status"]:
         with st.container(border=True):
             st.plotly_chart(
@@ -836,6 +1079,30 @@ with tab_classify:
                     "then run classification against the confirmed list."
                 )
 
+                # A project-level saved taxonomy (see db.save_taxonomy) lets
+                # every file in a project classify the same free-text column
+                # against the same categories, instead of each file inventing
+                # its own from scratch — which is what makes aggregating
+                # classified categories across files (the Portfolio view)
+                # meaningful in the first place, rather than comparing
+                # unrelated ad-hoc labels.
+                saved_taxonomy = (
+                    db.get_taxonomy(selected_project_id, target_col)
+                    if db_available and selected_project_id else None
+                )
+                if saved_taxonomy and "taxonomy" not in st.session_state:
+                    st.info(
+                        f"This project already has a saved taxonomy for "
+                        f"'{target_col}': {', '.join(saved_taxonomy)}"
+                    )
+                    if st.button("Use saved taxonomy", type="primary"):
+                        st.session_state["taxonomy"] = {"column": target_col, "categories": saved_taxonomy}
+                        st.rerun()
+                    st.caption(
+                        "Or propose a new one below — running classification with "
+                        "it will replace the saved taxonomy for this project/column."
+                    )
+
                 if st.button("1. Propose categories", type="primary"):
                     values = df[target_col].dropna().astype(str)
                     with st.spinner("Asking Gemini to propose categories..."):
@@ -881,11 +1148,131 @@ with tab_classify:
                                         "categories": confirmed_categories,
                                         "labels": result.tolist(),
                                     })
+                                if db_available and selected_project_id:
+                                    db.save_taxonomy(selected_project_id, target_col, confirmed_categories)
                                 progress.empty()
                                 st.rerun()
                             except (genai.errors.APIError, json.JSONDecodeError) as e:
                                 progress.empty()
                                 st.error(f"AI classification failed: {e}")
+
+# ---- AI Extraction: structured fields pulled out of a free-text column ----
+# Distinct from both tabs above: Insights summarises in prose, Classification
+# assigns one category label per row. This pulls several named, structured
+# attributes per row (location, severity, responsible trade, etc.) out of
+# unstructured text — genuine "data extraction," not categorisation.
+with tab_extract:
+    st.subheader("AI Extraction")
+    client = get_gemini_client()
+    if client is None:
+        st.info(
+            "No Gemini API key found. Add `GEMINI_API_KEY` to "
+            "`.streamlit/secrets.toml` locally, or under the app's "
+            "Settings -> Secrets on Streamlit Cloud, to enable this tab."
+        )
+    else:
+        existing_extraction = st.session_state.get("extraction")
+        if existing_extraction:
+            # Same one-at-a-time pattern as AI Classification: require an
+            # explicit delete before extracting again, rather than silently
+            # overwriting or piling up duplicate saved analyses.
+            extracted_series = existing_extraction["extracted"]
+            extracted_df = df.copy()
+            for field in existing_extraction["fields"]:
+                extracted_df[f"Extracted: {field}"] = [row.get(field) for row in extracted_series]
+            st.caption(
+                f"Extracted from '{existing_extraction['column']}': "
+                + ", ".join(existing_extraction["fields"])
+            )
+            display_cols = [existing_extraction["column"]] + [
+                f"Extracted: {f}" for f in existing_extraction["fields"]
+            ]
+            st.dataframe(extracted_df[display_cols], width="stretch")
+            st.download_button(
+                "Download extracted data (CSV)",
+                extracted_df.to_csv(index=False).encode("utf-8"),
+                "optimus_extracted.csv",
+                "text/csv",
+            )
+            if st.button("🗑 Delete this extraction", type="tertiary"):
+                st.session_state.pop("extraction", None)
+                if "db_file_id" in st.session_state:
+                    db.delete_analyses(st.session_state["db_file_id"], "extraction")
+                st.rerun()
+        else:
+            # Same "genuine free text, not IDs/serials" heuristic used for
+            # AI Insights sampling and AI Classification above.
+            eligible_cols = [
+                col for col in cols["text"]
+                if not df[col].dropna().empty
+                and df[col].dropna().astype(str).str.split().str.len().mean() >= 3
+            ]
+            if not eligible_cols:
+                st.caption("No free-text columns detected to extract from.")
+            else:
+                extract_target_col = st.selectbox(
+                    "Column to extract from", eligible_cols, key="extract_target_col"
+                )
+                st.caption(
+                    "Step 1: Gemini proposes a short set of structured fields "
+                    "worth pulling out of this free-text column — e.g. a "
+                    "location, a severity level, a responsible trade. Review/"
+                    "edit them, then run extraction against the confirmed list."
+                )
+
+                if st.button("1. Propose fields to extract", type="primary"):
+                    values = df[extract_target_col].dropna().astype(str)
+                    with st.spinner("Asking Gemini to propose fields..."):
+                        try:
+                            sample_size = min(30, len(values))
+                            sample = values.sample(sample_size, random_state=0).tolist()
+                            st.session_state["extraction_fields_proposal"] = {
+                                "column": extract_target_col,
+                                "fields": induce_extraction_fields(client, sample),
+                            }
+                        except (genai.errors.APIError, json.JSONDecodeError) as e:
+                            st.error(f"Field proposal failed: {e}")
+
+                proposal = st.session_state.get("extraction_fields_proposal")
+                if proposal and proposal["column"] == extract_target_col:
+                    st.write("**Proposed fields** — edit below if needed, one per line:")
+                    edited_fields = st.text_area(
+                        "Fields", value="\n".join(proposal["fields"]),
+                        height=140, label_visibility="collapsed", key="extract_fields_edit",
+                    )
+                    confirmed_fields = [f.strip() for f in edited_fields.split("\n") if f.strip()]
+
+                    if st.button("2. Run extraction with these fields", type="primary"):
+                        values = df[extract_target_col].dropna().astype(str)
+                        progress = st.progress(0.0)
+                        with st.spinner("Extracting with Gemini..."):
+                            try:
+                                extracted_list = extract_all(
+                                    client, values.tolist(), confirmed_fields,
+                                    progress_callback=progress.progress,
+                                )
+                                empty_row = {f: None for f in confirmed_fields}
+                                result = pd.Series(
+                                    [dict(empty_row) for _ in range(len(df))], index=df.index,
+                                )
+                                result.loc[values.index] = extracted_list
+                                st.session_state["extraction"] = {
+                                    "column": extract_target_col,
+                                    "fields": confirmed_fields,
+                                    "extracted": result,
+                                }
+                                st.session_state.pop("extraction_fields_proposal", None)
+                                if "db_file_id" in st.session_state:
+                                    db.save_analysis(st.session_state["db_file_id"], "extraction", {
+                                        "column": extract_target_col,
+                                        "fields": confirmed_fields,
+                                        "extracted": result.tolist(),
+                                    })
+                                progress.empty()
+                                st.rerun()
+                            except (genai.errors.APIError, json.JSONDecodeError) as e:
+                                progress.empty()
+                                st.error(f"AI extraction failed: {e}")
 
 # ---- Raw data + detected schema ----
 with tab_raw:

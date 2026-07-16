@@ -33,9 +33,23 @@ CREATE TABLE IF NOT EXISTS records (
 CREATE TABLE IF NOT EXISTS analyses (
     id SERIAL PRIMARY KEY,
     file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
-    type TEXT NOT NULL CHECK (type IN ('insights', 'classification')),
+    type TEXT NOT NULL CHECK (type IN ('insights', 'classification', 'extraction')),
     result JSONB,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- One reusable category set per (project, free-text column) — lets AI
+-- Classification reuse the same taxonomy across every file in a project
+-- instead of inventing a fresh one per file, which is what makes
+-- aggregating classified categories across files meaningful in the first
+-- place (see CLAUDE.md's cross-file aggregation feature).
+CREATE TABLE IF NOT EXISTS taxonomies (
+    id SERIAL PRIMARY KEY,
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    column_name TEXT NOT NULL,
+    categories JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (project_id, column_name)
 );
 
 CREATE INDEX IF NOT EXISTS idx_files_project_id ON files(project_id);

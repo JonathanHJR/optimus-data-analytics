@@ -806,6 +806,119 @@ create/rename/upload/delete-file/delete-project dialog flow to confirm
 none of this affected actual behavior (button `type` is purely visual).
 Test data cleaned up afterward.
 
+## Five features closing the deliverable-wording gap (2026-07-16)
+Internship deliverable #1's actual wording asks for AI-based "data
+extraction, pattern recognition, and automated categorisation" (see
+`[[project-jtc-internship-context]]` memory). Before this batch,
+categorisation was solid (AI Classification) and pattern recognition was
+shallow (one prose summary per file, never beyond a single file); data
+extraction didn't exist at all. Built five features together, in
+dependency order, to close that gap:
+
+### 1. Cross-file/cross-project Portfolio view
+New `render_portfolio(project_id)` — a "📊 View portfolio (aggregate all
+files)" button in the Manage panel (shown whenever a project has ≥1 saved
+file) switches into an aggregated view instead of the single-file tabs.
+Pools status/category counts, a combined time trend, and combined
+AI-classified categories across **every saved file in the project**,
+which nothing in the app could do before (only one loaded file at a
+time, even though the DB has held multiple files per project since it
+was first built). Different files can have entirely different column
+names — Optimus form types don't share a schema — so this pools by
+*role* (each file's own detected status/category/date column via its
+cached `detected_columns`), not by column name.
+
+Session-state-wise this is its own mode (`portfolio_mode`), mutually
+exclusive with `loaded_file`: entering portfolio mode clears any loaded
+file and vice versa, and — a bug caught before it shipped — a **fresh
+upload** while in portfolio mode needed the same clearing, otherwise the
+upload would silently sit unprocessed behind the portfolio view (the
+existing "fresh upload takes precedence" block only cleared
+`loaded_file`, not `portfolio_mode`, until this was added alongside it).
+
+### 2. Time-series trend charts
+New `trend_chart(df, date_col, title)` — previously the Overview tab
+showed only a static "Date range: X to Y" caption, no chart of whether
+issues were increasing or decreasing. Bucket width adapts to the data's
+actual span (daily ≤14 days, weekly ≤120 days, monthly beyond that) so a
+one-week upload doesn't render as a single flat monthly dot, and a
+year of data doesn't render as 365 daily bars. Wired into both the
+single-file Overview tab (using that file's own date column) and the
+Portfolio view (using dates pooled across every file).
+
+### 3. AI Extraction (new tab)
+New "🔍 AI Extraction" tab, structurally parallel to AI Classification
+(propose → review/edit → run) but a genuinely different operation:
+classification assigns **one category label** per row; extraction pulls
+**several named, structured fields** out of unstructured text into new
+columns (e.g. `defect_type`, `location`, `hazard_source` — confirmed via
+a live run against synthetic data, Gemini proposed exactly these kinds of
+fields unprompted). This is the literal "data extraction" the deliverable
+names, and nothing in the app did this before — Classification's one
+label per row doesn't capture "this defect happened at location X caused
+by Y," multiple independent facts about the same row.
+
+New Gemini helpers `induce_extraction_fields`/`extract_batch`/
+`extract_all`, mirroring `induce_taxonomy`/`classify_batch`/`classify_all`'s
+established retry-with-backoff and rate-limit pacing exactly (`extract_all`
+uses a smaller batch size — 20 vs. classification's 25 — since each row now
+returns a whole dict of fields instead of one label, using more output
+tokens per call). Same restore-on-load and delete-gating pattern as
+Insights/Classification: `db.py`'s `analyses.type` CHECK constraint was
+extended to allow `'extraction'` (migrated directly on the live Neon
+instance, plus `schema.sql` updated for any future fresh deployment).
+Row alignment back to the full (non-dropna'd) dataframe uses the same
+`pd.Series` `.loc[values.index] = ...` pattern already established by
+Classification, just holding dicts instead of strings per cell — verified
+this assignment pattern works correctly for object-dtype Series before
+relying on it (a quick standalone check, not assumed).
+
+### 4. Shared/canonical taxonomy per project
+New `taxonomies` table (`project_id`, `column_name`, `categories`, unique
+on `(project_id, column_name)`) plus `db.get_taxonomy`/`db.save_taxonomy`.
+Previously every classification run invented its own category list from
+scratch, even for the same column in the same project — meaning
+Portfolio's aggregated classification chart (feature 1) would have been
+comparing unrelated ad-hoc labels across files, not a real aggregate.
+Now, selecting a column in AI Classification checks for an existing saved
+taxonomy for that (project, column) pair and, if found, offers "Use saved
+taxonomy" as an alternative to proposing a new one from scratch; running
+classification (whether via a saved or freshly-proposed taxonomy) saves/
+overwrites the project's taxonomy for that column via `db.save_taxonomy`.
+
+### 5. Anomaly/outlier flagging
+New `flag_outliers(counts, min_points=4)` (mean + 1.5×std, a simple
+explainable spike detector — not a rigorous statistical test, and
+deliberately does nothing until there are at least 4 distinct values,
+since "usual" is meaningless with 2-3 categories) and
+`annotate_outliers(fig, counts, orientation)`, which marks flagged
+bars/points with a small "⚠ spike" text annotation rather than a
+recolor — per the dataviz principle that flagged meaning should carry a
+direct label, not rely on color alone. Wired into both `bar_of_counts`
+(single-file Overview charts) and the Portfolio view's aggregated charts.
+`bar_of_counts` was refactored to delegate to a new `bar_of_series(counts,
+title)` taking an already-computed Series directly, since Portfolio needed
+the same chart built from counts pooled across multiple files — which
+never existed as one DataFrame column to run `value_counts()` on.
+
+### Verification
+Built a synthetic fixture (40 rows, 5 categories with `Safety` deliberately
+dominant — 22 of 40 rows — to guarantee the outlier threshold actually
+trips) split across two files in one test project. Confirmed via
+Playwright + screenshots: the trend chart renders in Overview; the
+Portfolio view's KPIs/trend/status/category charts all render correctly
+combined across both files; the "⚠ spike" annotation appears exactly next
+to the dominant Safety bar; AI Extraction proposes sensible fields and
+extracts genuinely differentiated values per row via a live Gemini call;
+extraction restores on reload and is delete-gated exactly like Insights/
+Classification (confirmed the delete actually removes the row from Neon,
+not just client-side). One real bug caught and fixed: the shared-taxonomy
+"Use saved taxonomy" flow initially appeared not to work in an early test
+— turned out to be the test script's `:has-text()` selector matching
+ambiguously, not an app bug (confirmed by a targeted repro using an exact
+role-based selector, reproduced twice). All test data cleaned up from
+Neon afterward; the real "Testt" project confirmed untouched throughout.
+
 ## Optimus API feasibility (investigated, not pursued) (2026-07-15)
 Investigated whether Optimus could be integrated with directly (API pull)
 instead of manual Excel export, to remove the human export-then-upload

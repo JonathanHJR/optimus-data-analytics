@@ -115,7 +115,7 @@ def save_analysis(file_id: int, analysis_type: str, result) -> int:
     """Insert an analysis result (AI Insights text or Classification data).
     `result` is stored as JSONB — plain strings get wrapped in {"text": ...}
     so both shapes round-trip through the same JSONB column cleanly."""
-    if analysis_type not in ("insights", "classification"):
+    if analysis_type not in ("insights", "classification", "extraction"):
         raise ValueError(f"Unknown analysis type: {analysis_type!r}")
     payload = result if isinstance(result, dict) else {"text": result}
     with get_connection() as conn, conn.cursor() as cur:
@@ -208,3 +208,54 @@ def delete_file(file_id: int) -> None:
     with get_connection() as conn, conn.cursor() as cur:
         cur.execute("DELETE FROM files WHERE id = %s", (file_id,))
         conn.commit()
+
+
+def get_taxonomy(project_id: int, column_name: str) -> list | None:
+    """Returns the saved category list for this (project, column), or None
+    if AI Classification has never been run/saved against this column in
+    this project yet."""
+    with get_connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT categories FROM taxonomies WHERE project_id = %s AND column_name = %s",
+            (project_id, column_name),
+        )
+        row = cur.fetchone()
+        return row[0] if row else None
+
+
+def save_taxonomy(project_id: int, column_name: str, categories: list) -> None:
+    """Upserts the category list for this (project, column) — reused across
+    every file in the project classified against this column, rather than
+    each file inventing its own taxonomy from scratch. Overwrites any
+    previously saved taxonomy for this exact (project, column) pair."""
+    with get_connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO taxonomies (project_id, column_name, categories)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (project_id, column_name)
+            DO UPDATE SET categories = EXCLUDED.categories, created_at = now()
+            """,
+            (project_id, column_name, json.dumps(categories)),
+        )
+        conn.commit()
+
+
+def get_project_classifications(project_id: int) -> list[dict]:
+    """Returns the latest classification analysis for every file in a
+    project that has one — each tagged with its file_id/filename, for
+    aggregating classified categories across files. DISTINCT ON picks only
+    the most recent classification per file, in case older rows exist from
+    before the delete-before-regenerate gating was added."""
+    with get_connection() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT ON (a.file_id) a.file_id, f.filename, a.result, a.created_at
+            FROM analyses a
+            JOIN files f ON f.id = a.file_id
+            WHERE f.project_id = %s AND a.type = 'classification'
+            ORDER BY a.file_id, a.created_at DESC
+            """,
+            (project_id,),
+        )
+        return [dict(r) for r in cur.fetchall()]
