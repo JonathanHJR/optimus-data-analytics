@@ -16,6 +16,7 @@ import io
 import json
 import os
 import time
+from collections import Counter
 from pathlib import Path
 import pandas as pd
 import streamlit as st
@@ -367,9 +368,9 @@ def new_project_dialog():
     new_name = st.text_input("Project name")
     new_desc = st.text_input("Description (optional)")
     if st.button("Create project", type="primary") and new_name.strip():
-        db.create_project(new_name.strip(), new_desc.strip())
+        new_id = db.create_project(new_name.strip(), new_desc.strip())
         cached_list_projects.clear()
-        st.session_state["_pending_project_choice"] = new_name.strip()
+        st.session_state["_pending_project_choice"] = new_id
         st.rerun()
 
 
@@ -380,7 +381,7 @@ def rename_project_dialog(project: dict):
     if st.button("Save changes", type="primary") and new_name.strip():
         db.rename_project(project["id"], new_name.strip(), new_desc.strip())
         cached_list_projects.clear()
-        st.session_state["_pending_project_choice"] = new_name.strip()
+        st.session_state["_pending_project_choice"] = project["id"]
         st.rerun()
 
 
@@ -395,7 +396,7 @@ def delete_project_dialog(project: dict):
         if confirm_text == project["name"]:
             db.delete_project(project["id"])
             cached_list_projects.clear()
-            st.session_state["_pending_project_choice"] = "(none)"
+            st.session_state["_pending_project_choice"] = None
             st.session_state.pop("loaded_file", None)
             st.rerun()
         else:
@@ -424,7 +425,7 @@ except Exception:
     projects = []
     db_available = False
 
-st.title("Optimus Data Analytics Dashboard")
+st.title("Optimus Data Analytics")
 
 # ---- Top panel: project selection, upload, and Manage — all in one place ----
 # Previously project selection/upload lived in the sidebar while rename/
@@ -438,11 +439,43 @@ st.title("Optimus Data Analytics Dashboard")
 # left there, none renders at all.
 selected_project_id = None
 with st.container(border=True):
-    ctrl_col1, ctrl_col2, ctrl_col3 = st.columns([2, 1, 2])
+    # vertical_alignment="bottom" lines the button up with the selectbox's
+    # own bottom edge — the previously used blank st.write("") spacer was an
+    # approximation of this, not an exact match.
+    ctrl_col1, ctrl_col2, ctrl_col3 = st.columns([2, 1, 2], vertical_alignment="bottom")
     with ctrl_col1:
         if db_available:
-            project_options = {p["name"]: p["id"] for p in projects}
-            all_choices = ["(none)"] + list(project_options.keys())
+            # Selectbox options are project IDs, not names, with format_func
+            # supplying the display label. Project names aren't guaranteed
+            # unique (no such constraint exists, and nothing in the UI stops
+            # someone creating two projects with the same name) — keying by
+            # name meant two same-named projects would collide in the
+            # {name: id} lookup, silently resolving "Select a project" to
+            # whichever one happened to win the dict, including for Delete.
+            #
+            # Using unique IDs as the option values isn't enough by itself:
+            # confirmed (via a standalone repro) that Streamlit's selectbox
+            # can't distinguish two options whose *rendered* format_func
+            # text is identical, even when their underlying values differ —
+            # it always resolves to the last matching option regardless of
+            # which visually-identical row was actually clicked. So the
+            # display label itself must be made unique whenever two
+            # projects share a name, not just the value backing it.
+            project_by_id = {p["id"]: p for p in projects}
+            choice_ids = [None] + list(project_by_id.keys())
+            name_counts = Counter(p["name"] for p in projects)
+
+            def _format_project_choice(pid):
+                if pid is None:
+                    return "(none)"
+                p = project_by_id[pid]
+                if name_counts[p["name"]] > 1:
+                    # created_at isn't reliably unique enough either (two
+                    # projects can be created within the same minute, or
+                    # even the same second) — the id is the one thing
+                    # actually guaranteed distinct.
+                    return f"{p['name']} (#{p['id']})"
+                return p["name"]
 
             # Use key= so Streamlit manages this widget's state natively,
             # instead of computing index= from a session_state snapshot read
@@ -456,14 +489,13 @@ with st.container(border=True):
             # indirection is applied here, before the selectbox below exists.
             if "_pending_project_choice" in st.session_state:
                 st.session_state["project_choice"] = st.session_state.pop("_pending_project_choice")
-            if st.session_state.get("project_choice") not in all_choices:
-                st.session_state["project_choice"] = "(none)"
-            choice = st.selectbox("Project", all_choices, key="project_choice")
-            if choice != "(none)":
-                selected_project_id = project_options[choice]
+            if st.session_state.get("project_choice") not in choice_ids:
+                st.session_state["project_choice"] = None
+            selected_project_id = st.selectbox(
+                "Project", choice_ids, format_func=_format_project_choice, key="project_choice"
+            )
     with ctrl_col2:
         if db_available:
-            st.write("")  # nudges the button down to align with the selectbox
             if st.button("+ New project"):
                 new_project_dialog()
     with ctrl_col3:
@@ -487,19 +519,24 @@ with st.container(border=True):
     if db_available and selected_project_id:
         current_project = next((p for p in projects if p["id"] == selected_project_id), None)
         st.divider()
-        header_col, rename_col, delete_col = st.columns([4, 1, 1])
+        # Same [3, 2, 1, 1] column split as the saved-file rows below, so
+        # Rename/Delete line up directly above Load/Delete instead of using
+        # a different ratio that put them at unrelated x-positions.
+        header_col, _spacer_col, rename_col, delete_col = st.columns(
+            [3, 2, 1, 1], vertical_alignment="center"
+        )
         # Plain bold text, not st.subheader — this is a per-project label
         # inside an otherwise compact control panel, not a section heading.
         header_col.markdown(f"**📁 {current_project['name']}**")
-        if rename_col.button("✏️ Rename", key=f"open_rename_{selected_project_id}"):
+        if rename_col.button("Rename", key=f"open_rename_{selected_project_id}"):
             rename_project_dialog(current_project)
-        if delete_col.button("🗑️ Delete", key=f"open_delete_proj_{selected_project_id}"):
+        if delete_col.button("Delete", key=f"open_delete_proj_{selected_project_id}"):
             delete_project_dialog(current_project)
 
         saved_files = cached_list_files(selected_project_id)
         st.caption("Saved files" if saved_files else "No files saved to this project yet.")
         for f in saved_files:
-            fcol1, fcol2, fcol3, fcol4 = st.columns([3, 2, 1, 1])
+            fcol1, fcol2, fcol3, fcol4 = st.columns([3, 2, 1, 1], vertical_alignment="center")
             fcol1.write(f["filename"])
             fcol2.caption(f"{f['form_type']} · {f['uploaded_at']:%Y-%m-%d %H:%M}")
             if fcol3.button("Load", key=f"load_{f['id']}"):
@@ -510,7 +547,9 @@ with st.container(border=True):
                     "project_id": selected_project_id,
                 }
                 st.rerun()
-            if fcol4.button("🗑️", key=f"delete_btn_{f['id']}"):
+            # Text, not a bare icon — matches the Rename/Delete convention
+            # used one row up for the project itself.
+            if fcol4.button("Delete", key=f"delete_btn_{f['id']}"):
                 delete_file_dialog(f)
 
 if uploaded is None and loaded_file_info is None:
@@ -585,11 +624,10 @@ if st.session_state.get("data_identity") != data_identity:
             }
 
 if db_available and selected_project_id and data_identity[0] == "upload" and "db_file_id" not in st.session_state:
-    save_col1, save_col2 = st.columns([3, 1])
+    save_col1, save_col2 = st.columns([3, 1], vertical_alignment="bottom")
     with save_col1:
         form_type = st.text_input("Save to database as", value=Path(filename).stem)
     with save_col2:
-        st.write("")  # nudges the button down to align with the text input
         if st.button("💾 Save", use_container_width=True):
             file_id = db.save_file(selected_project_id, form_type, filename, cols, df)
             cached_list_files.clear()

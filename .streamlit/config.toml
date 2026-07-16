@@ -9,17 +9,47 @@ textColor = "#1A1A1A"
 font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
 headingFont = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
 baseRadius = "0.5rem"
-showSidebarBorder = true
 dataframeHeaderBackgroundColor = "#EAF1F8"
 metricValueFontWeight = 700
+
+# Widget borders + a branded border color — previously unset, so every
+# input/container fell back to a generic gray that didn't relate to the
+# rest of the palette.
+showWidgetBorder = true
+borderColor = "#C7D7E5"
+dataframeBorderColor = "#C7D7E5"
+
+# Links and semantic colors (st.success/warning/error, :green[]/:red[] text)
+# were left at Streamlit's defaults before, which didn't relate to the rest
+# of the palette either. blueColor/violetColor also feed colored markdown
+# text and match the categorical chart slots below.
+linkColor = "#0B5394"
+linkUnderline = false
+blueColor = "#0B5394"
+greenColor = "#0CA30C"
+yellowColor = "#FAB219"
+orangeColor = "#EC835A"
+redColor = "#D03B3B"
+violetColor = "#4A3AA7"
+grayColor = "#5A6B7A"
+
+# Categorical chart palette — replaces one that failed color-blind-safety
+# validation (a pale blue that read as gray, and two colors indistinguishable
+# under protanopia). This 8-color set is chosen from the dataviz skill's
+# validated reference order (see references/palette.md), with the app's own
+# brand navy substituted into slot 1 and re-validated in that position —
+# passes lightness band, chroma floor, CVD separation, and normal-vision
+# floor against both this app's white and pale-blue surfaces (checked via
+# validate_palette.js). Three slots read below 3:1 contrast on a light
+# surface by design — mitigated by this app's charts already showing direct
+# value labels on every bar, not color alone.
 chartCategoricalColors = [
     "#0B5394",
-    "#6FA8DC",
-    "#38761D",
-    "#B45F06",
-    "#674EA7",
-    "#A64D79",
+    "#008300",
+    "#E87BA4",
+    "#EDA100",
+    "#1BAF7A",
+    "#EB6834",
+    "#4A3AA7",
+    "#E34948",
 ]
-
-[theme.sidebar]
-backgroundColor = "#F3F7FB"

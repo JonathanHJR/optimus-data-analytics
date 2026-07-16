@@ -620,6 +620,94 @@ in AI Classification's eligible-columns list. Test fixtures for anything
 touching classification need enough rows (40+ with genuinely distinct
 values worked) for the free-text column to exceed that threshold.
 
+## Alignment, naming, and a duplicate-project-name bug (2026-07-16)
+User feedback on the new top-panel layout: the "+ New project" button
+didn't line up with the dropdown next to it, and the Manage panel's
+Rename/Delete buttons didn't line up with the saved-file rows' Load/
+Delete — both previously used a manual blank `st.write("")` as a spacer
+to fake vertical alignment, an approximation that didn't quite land.
+Fixed properly using `st.columns(..., vertical_alignment="bottom"/"center")`
+— a real, documented Streamlit parameter (available since ~1.32, confirmed
+present on the 1.58 this app runs) — instead of the spacer hack. The
+Manage panel's header row and each saved-file row now also share the
+exact same `[3, 2, 1, 1]` column split so their buttons land in identical
+x-positions. The saved-file row's delete button changed from a bare 🗑️
+icon to "Delete" text, matching the Rename/Delete convention already used
+one row up. Title shortened from "Optimus Data Analytics Dashboard" to
+just "Optimus Data Analytics", matching the project's existing naming
+convention everywhere else (folder name, `page_title`, etc.) — "Analytics"
+kept over "Analysis" for the same reason.
+
+**Bug found while testing the alignment fix, not part of the original
+ask**: seeded a test project literally named "Testt" to visually compare
+against the user's screenshot, without checking first whether that name
+already existed — it did: the user's own real project (id 7, with their
+actual Contract Cashflow / Safety Observation files) is also named
+"Testt". This exposed a real defect: `project_options = {p["name"]: p["id"]
+for p in projects}` keyed the project selector by name, so two projects
+sharing a name collide in the dict and the selector silently resolves to
+whichever one the dict happened to keep — including for Delete. No data
+was lost (only reads happened against the wrong project during testing —
+create and load are non-destructive; confirmed via direct query that the
+real project's two files were untouched throughout), but the bug itself
+was real and would bite the user the moment they ever created two
+same-named projects by accident.
+
+Fixed in two parts, because the first fix alone wasn't sufficient:
+1. Changed the selectbox to use project **IDs** as the option values
+   (`format_func` supplies the display name), so the underlying value is
+   never ambiguous.
+2. That still wasn't enough on its own — confirmed via a standalone
+   repro script that Streamlit's selectbox can't distinguish two options
+   whose *rendered* `format_func` text is identical, even when the
+   backing values differ; it always resolves to the last matching
+   option regardless of which visually-identical row was actually
+   clicked. So `_format_project_choice` now also disambiguates the
+   *label itself* whenever a name collision exists, appending `(#id)` —
+   `created_at` was tried first but rejected since two projects can be
+   created within the same minute (or even the same second, as the test
+   itself did), so it isn't reliably unique enough; the id is the one
+   thing actually guaranteed distinct.
+
+Verified with a dedicated test: seeded two projects under a deliberately
+non-colliding test name (`TEST-DUPLICATE-NAME`, to avoid ever repeating
+the original mistake) with different saved files each, confirmed the
+dropdown now shows disambiguated labels (`TEST-DUPLICATE-NAME (#31)` /
+`(#30)`), and that selecting each one loads that project's own file, not
+the other's. Re-ran the full create/rename/upload/delete-file/
+delete-project dialog flow to confirm the id-based rewrite didn't break
+the ordinary (non-duplicate) case. All test data cleaned up; the real
+"Testt" project (id 7) confirmed untouched throughout.
+
+## Chart and UI color polish (2026-07-16)
+User feedback: the color scheme "looks very plain." Ran the existing
+`chartCategoricalColors` through the dataviz skill's palette validator
+before assuming it just needed a subjective refresh — it actually
+**failed** three of four hard checks: the pale blue (`#6FA8DC`) read as
+gray (below the chroma floor), two colors were nearly indistinguishable
+under protanopia (ΔE 0.7), and two more were barely distinguishable even
+with normal color vision (ΔE 13.8, below the 15 floor). Replaced with an
+8-color set built from the skill's validated reference ordering
+(`references/palette.md`), substituting this app's own brand navy into
+slot 1 and re-validating in that position — passes lightness band,
+chroma floor, CVD separation, and normal-vision floor against both this
+app's surfaces (white and the pale-blue secondary background). Three
+slots read below 3:1 contrast on a light surface by design (documented in
+the skill as expected for warm/light hues) — mitigated by this app's bar
+charts already showing direct value labels (`text="Count"`), not color
+alone.
+
+Also added, all via `.streamlit/config.toml` only (no CSS, per this
+project's native-styling-only rule): `showWidgetBorder = true` +
+`borderColor` so inputs have real definition instead of blending into
+white; `dataframeBorderColor` matching; semantic colors
+(`greenColor`/`yellowColor`/`orangeColor`/`redColor`/`blueColor`/
+`violetColor`/`grayColor`) so `st.success`/`st.warning`/`st.error` and
+`:green[]`/`:red[]` markdown read as part of the same palette instead of
+Streamlit's unrelated defaults; `linkColor`/`linkUnderline`. Removed the
+now-dead `showSidebarBorder` and `[theme.sidebar]` block, since the
+sidebar itself was already removed in the previous session's change.
+
 ## Optimus API feasibility (investigated, not pursued) (2026-07-15)
 Investigated whether Optimus could be integrated with directly (API pull)
 instead of manual Excel export, to remove the human export-then-upload
