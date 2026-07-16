@@ -919,6 +919,30 @@ ambiguously, not an app bug (confirmed by a targeted repro using an exact
 role-based selector, reproduced twice). All test data cleaned up from
 Neon afterward; the real "Testt" project confirmed untouched throughout.
 
+### Production bug found post-deploy: `trend_chart`'s monthly bucket (2026-07-16)
+User hit `ValueError: Invalid frequency: ME` clicking into the Portfolio
+view on staging. Root cause: `trend_chart`'s bucket-width logic used `"ME"`
+for the >120-day-span branch, assuming `Period` and `Offset` frequency
+strings share the same aliases — they don't. `Series.dt.to_period()` still
+takes the old-style Period alias (`"M"` = month); `"ME"` (month-*end*) is
+the newer alias pandas prefers for `resample()`/`date_range()`, and
+`to_period()` raises on it rather than accepting it. This is exactly why
+it slipped through testing: the original synthetic fixture only spanned
+~40-60 days, so the `"W"` (weekly) branch was the only one ever exercised
+locally — the `"M"`/`"ME"` branch was never actually run before reaching
+production. Not related to any Gemini/API rate limit, despite the
+traceback showing up right after a batch of AI feature testing — pure
+pandas, no network call involved.
+
+Fixed by using `"M"` (not `"ME"`) in the `to_period()` call. Verified with
+a purpose-built fixture spanning 234 days (forcing the monthly branch)
+against both the single-file Overview tab and the Portfolio view — this
+also incidentally confirmed the outlier "⚠ spike" annotation's *vertical*
+(line-chart) code path works, which the original horizontal-bar-only test
+hadn't exercised either. Lesson for future chart-bucketing tests: always
+construct fixtures that force *every* branch of a threshold-based bucket
+choice, not just whichever one the first test dataset happens to land in.
+
 ## Optimus API feasibility (investigated, not pursued) (2026-07-15)
 Investigated whether Optimus could be integrated with directly (API pull)
 instead of manual Excel export, to remove the human export-then-upload

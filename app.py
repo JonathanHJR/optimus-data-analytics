@@ -160,7 +160,12 @@ def trend_chart(df: pd.DataFrame, date_col: str, title: str):
     if dates.empty:
         return None
     span_days = (dates.max() - dates.min()).days
-    freq = "D" if span_days <= 14 else ("W" if span_days <= 120 else "ME")
+    # "M" here, not the newer "ME" alias: Series.dt.to_period() still uses
+    # the old-style Period frequency strings ("M" = month) — "ME" is the
+    # month-*end* offset alias meant for resample()/date_range(), and
+    # to_period() raises ValueError on it. Only bites when the date span
+    # exceeds 120 days, which the original test fixture never did.
+    freq = "D" if span_days <= 14 else ("W" if span_days <= 120 else "M")
     periods = dates.dt.to_period(freq).dt.to_timestamp()
     counts = periods.value_counts().sort_index()
     if len(counts) < 2:
