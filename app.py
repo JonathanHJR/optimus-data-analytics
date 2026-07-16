@@ -72,6 +72,17 @@ def cached_list_files(project_id: int):
     return db.list_files(project_id)
 
 
+# No ttl here, unlike the two above — a file's records are immutable once
+# saved (db.py has no "update records in place" path; a new upload always
+# becomes a new file id), so there's no freshness window to balance, only
+# pure waste from re-fetching on every unrelated rerun (switching tabs,
+# touching the Filter dropdown, changing project — literally anything).
+# max_entries bounds memory if a session loads many different files.
+@st.cache_data(max_entries=20)
+def cached_load_file_records(file_id: int):
+    return db.load_file_records(file_id)
+
+
 def guess_columns(df: pd.DataFrame) -> dict[str, list[str]]:
     """Heuristically classify columns by shape alone (name + dtype +
     cardinality) — no knowledge of any specific Optimus form's schema, so
@@ -562,7 +573,7 @@ if uploaded is None and loaded_file_info is None:
     st.stop()
 
 if loaded_file_info is not None:
-    df = db.load_file_records(loaded_file_info["file_id"])
+    df = cached_load_file_records(loaded_file_info["file_id"])
     cols = loaded_file_info["detected_columns"]
     filename = loaded_file_info["filename"]
     data_identity = ("db_file", loaded_file_info["file_id"])

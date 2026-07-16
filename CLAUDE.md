@@ -734,6 +734,46 @@ Streamlit's unrelated defaults; `linkColor`/`linkUnderline`. Removed the
 now-dead `showSidebarBorder` and `[theme.sidebar]` block, since the
 sidebar itself was already removed in the previous session's change.
 
+## Streamlit performance model, and caching load_file_records (2026-07-16)
+User asked what determines Streamlit's loading speed, then confirmed the
+lag they'd noticed switching between projects matched the explanation:
+**every interaction reruns the entire script top to bottom**, not just
+the part that changed — so any single click's latency is bounded by
+whatever the whole script does on that pass, not by the specific widget
+touched. The two biggest levers are (1) what's wrapped in
+`st.cache_data`/`st.cache_resource` vs. re-executed on every rerun, and
+(2) external calls sitting in that rerun path (Neon query latency, Neon's
+scale-to-zero cold start, a blocking Gemini call).
+
+Re-reading the app against that lens surfaced a live instance of exactly
+this: `df = db.load_file_records(loaded_file_info["file_id"])` in the
+main flow was **not** cached, unlike `cached_list_projects()` /
+`cached_list_files()` just above it — so every rerun (switching projects,
+touching the Filter dropdown, changing tabs, anything) re-fetched and
+re-deserialized the entire currently-loaded file's records from Neon,
+even though nothing about that file had changed.
+
+Fixed with `cached_load_file_records()`, deliberately **not** given a
+`ttl` like the other two caches — those exist because their underlying
+data changes (create/rename/delete project or file), so a short TTL
+balances freshness against re-query cost. A file's records have no
+mutation path at all once saved (`db.py` has no "update records in
+place" — a re-upload always becomes a new file id), so there's no
+freshness tradeoff to make; it's cached with `max_entries=20` only to
+cap memory if a session loads many distinct files. `st.cache_data`
+(rather than `st.cache_resource`) still applies here since the caller
+mutates the returned `df` (the date-column reparse right below it) —
+`cache_data` hands back a fresh copy each call, so that mutation can't
+corrupt the cached original.
+
+Verified: a bare-Python timing check showed the first call hitting Neon
+(~80ms) and the second call returning in ~0ms. Seeded two files of
+different row counts under one test project, loaded each in turn via
+Playwright, and confirmed no cross-file contamination — each file's own
+row count and filename displayed correctly regardless of load order or
+how many unrelated reruns happened in between. Test data cleaned up
+afterward.
+
 ## Optimus API feasibility (investigated, not pursued) (2026-07-15)
 Investigated whether Optimus could be integrated with directly (API pull)
 instead of manual Excel export, to remove the human export-then-upload
@@ -967,7 +1007,9 @@ supported: Restricted / Sensitive Normal) remains a valid hosting choice.
 # from the project root, with the virtual environment active
 streamlit run app.py
 ```
-App serves at `localhost:8501`. Upload an Optimus Excel export via the sidebar.
+App serves at `localhost:8501`. Upload an Optimus Excel export from the
+top panel (there is no sidebar — it was removed, see "Sidebar removed
+entirely" below).
 
 ## Environment setup (reference)
 ```bash
