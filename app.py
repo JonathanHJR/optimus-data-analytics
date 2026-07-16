@@ -368,10 +368,13 @@ def new_project_dialog():
     new_name = st.text_input("Project name")
     new_desc = st.text_input("Description (optional)")
     if st.button("Create project", type="primary") and new_name.strip():
-        new_id = db.create_project(new_name.strip(), new_desc.strip())
-        cached_list_projects.clear()
-        st.session_state["_pending_project_choice"] = new_id
-        st.rerun()
+        try:
+            new_id = db.create_project(new_name.strip(), new_desc.strip())
+            cached_list_projects.clear()
+            st.session_state["_pending_project_choice"] = new_id
+            st.rerun()
+        except db.DuplicateProjectNameError as e:
+            st.error(str(e))
 
 
 @st.dialog("Rename project")
@@ -379,10 +382,13 @@ def rename_project_dialog(project: dict):
     new_name = st.text_input("Name", value=project["name"])
     new_desc = st.text_input("Description", value=project.get("description") or "")
     if st.button("Save changes", type="primary") and new_name.strip():
-        db.rename_project(project["id"], new_name.strip(), new_desc.strip())
-        cached_list_projects.clear()
-        st.session_state["_pending_project_choice"] = project["id"]
-        st.rerun()
+        try:
+            db.rename_project(project["id"], new_name.strip(), new_desc.strip())
+            cached_list_projects.clear()
+            st.session_state["_pending_project_choice"] = project["id"]
+            st.rerun()
+        except db.DuplicateProjectNameError as e:
+            st.error(str(e))
 
 
 @st.dialog("Delete project")

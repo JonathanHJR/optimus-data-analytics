@@ -679,6 +679,32 @@ delete-project dialog flow to confirm the id-based rewrite didn't break
 the ordinary (non-duplicate) case. All test data cleaned up; the real
 "Testt" project (id 7) confirmed untouched throughout.
 
+**Follow-up: duplicate names now prevented outright (2026-07-16).** Asked
+the user directly whether duplicate project names should be allowed at
+all, now that the selector no longer breaks on them — decided no: there's
+no real workflow that wants two identically-named projects, and the
+`(#id)` disambiguation suffix is a fallback, not something a user should
+ever actually see. Added `CREATE UNIQUE INDEX idx_projects_name_lower ON
+projects (LOWER(name))` to `schema.sql` (applied directly to the live
+Neon instance too) — case-insensitive, so "Testt" and "TESTT" are treated
+as the same collision, not just exact-case duplicates. `db.py`'s
+`create_project`/`rename_project` catch `psycopg2.errors.UniqueViolation`
+and re-raise as a new `DuplicateProjectNameError` with a clean message;
+`new_project_dialog`/`rename_project_dialog` in `app.py` catch it and
+show `st.error(...)` instead of crashing. The id-based selection +
+label-disambiguation fix from above is kept as a defensive fallback (in
+case of old data or any edge case that slips past the constraint), even
+though it should no longer be reachable in normal use going forward.
+
+Verified: attempting to create/rename to an existing name (including a
+different-case variant) raises `DuplicateProjectNameError` cleanly at the
+`db.py` level and shows a proper error message in the dialog at the UI
+level, in both cases without creating a stray row. Confirmed renaming a
+project to its own unchanged name (e.g. editing just the description)
+still works — the unique index doesn't conflict with a row matching
+itself. Confirmed no case-insensitive duplicates existed in the live data
+before adding the constraint, so the migration applied cleanly.
+
 ## Chart and UI color polish (2026-07-16)
 User feedback: the color scheme "looks very plain." Ran the existing
 `chartCategoricalColors` through the dataviz skill's palette validator

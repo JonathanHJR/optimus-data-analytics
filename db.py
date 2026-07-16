@@ -13,7 +13,15 @@ import os
 
 import pandas as pd
 import psycopg2
+import psycopg2.errors
 import psycopg2.extras
+
+
+class DuplicateProjectNameError(ValueError):
+    """Raised when creating/renaming a project would collide with an
+    existing project's name (case-insensitive) — enforced by a unique
+    index on LOWER(name), since two same-named projects used to break the
+    project selector (see CLAUDE.md)."""
 
 
 def get_database_url() -> str | None:
@@ -37,15 +45,22 @@ def get_connection():
 
 
 def create_project(name: str, description: str = "") -> int:
-    """Insert a new project, return its id."""
+    """Insert a new project, return its id. Raises DuplicateProjectNameError
+    if a project with this name (case-insensitive) already exists."""
     with get_connection() as conn, conn.cursor() as cur:
-        cur.execute(
-            "INSERT INTO projects (name, description) VALUES (%s, %s) RETURNING id",
-            (name, description),
-        )
-        project_id = cur.fetchone()[0]
-        conn.commit()
-        return project_id
+        try:
+            cur.execute(
+                "INSERT INTO projects (name, description) VALUES (%s, %s) RETURNING id",
+                (name, description),
+            )
+            project_id = cur.fetchone()[0]
+            conn.commit()
+            return project_id
+        except psycopg2.errors.UniqueViolation:
+            conn.rollback()
+            raise DuplicateProjectNameError(
+                f'A project named "{name}" already exists.'
+            ) from None
 
 
 def list_projects() -> list[dict]:
@@ -161,12 +176,20 @@ def get_project(project_id: int) -> dict | None:
 
 
 def rename_project(project_id: int, name: str, description: str = "") -> None:
+    """Raises DuplicateProjectNameError if renaming to `name` would collide
+    (case-insensitively) with a different, already-existing project."""
     with get_connection() as conn, conn.cursor() as cur:
-        cur.execute(
-            "UPDATE projects SET name = %s, description = %s WHERE id = %s",
-            (name, description, project_id),
-        )
-        conn.commit()
+        try:
+            cur.execute(
+                "UPDATE projects SET name = %s, description = %s WHERE id = %s",
+                (name, description, project_id),
+            )
+            conn.commit()
+        except psycopg2.errors.UniqueViolation:
+            conn.rollback()
+            raise DuplicateProjectNameError(
+                f'A project named "{name}" already exists.'
+            ) from None
 
 
 def delete_project(project_id: int) -> None:

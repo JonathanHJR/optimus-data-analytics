@@ -42,3 +42,10 @@ CREATE INDEX IF NOT EXISTS idx_files_project_id ON files(project_id);
 CREATE INDEX IF NOT EXISTS idx_records_file_id ON records(file_id);
 CREATE INDEX IF NOT EXISTS idx_records_data ON records USING GIN (data);
 CREATE INDEX IF NOT EXISTS idx_analyses_file_id ON analyses(file_id);
+
+-- Case-insensitive: prevents "Testt" and "testt" from being treated as
+-- different projects just as much as two exact-case duplicates. Two
+-- projects with the same name broke the project selector (see CLAUDE.md,
+-- "Alignment, naming, and a duplicate-project-name bug") — this prevents
+-- the situation at the source instead of only coping with it gracefully.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_name_lower ON projects (LOWER(name));
