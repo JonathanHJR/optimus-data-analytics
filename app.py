@@ -234,17 +234,18 @@ def render_portfolio(project_id: int):
 
     all_status, all_category, all_dates = [], [], []
     total_records = 0
-    for f in saved_files:
-        file_df = cached_load_file_records(f["id"])
-        total_records += len(file_df)
-        file_cols = f["detected_columns"] or {}
-        if file_cols.get("status"):
-            all_status.extend(file_df[file_cols["status"][0]].dropna().astype(str).tolist())
-        if file_cols.get("category"):
-            all_category.extend(file_df[file_cols["category"][0]].dropna().astype(str).tolist())
-        if file_cols.get("date"):
-            parsed = pd.to_datetime(file_df[file_cols["date"][0]], errors="coerce")
-            all_dates.extend(parsed.dropna().tolist())
+    with st.spinner(f"Aggregating {len(saved_files)} file(s)..."):
+        for f in saved_files:
+            file_df = cached_load_file_records(f["id"])
+            total_records += len(file_df)
+            file_cols = f["detected_columns"] or {}
+            if file_cols.get("status"):
+                all_status.extend(file_df[file_cols["status"][0]].dropna().astype(str).tolist())
+            if file_cols.get("category"):
+                all_category.extend(file_df[file_cols["category"][0]].dropna().astype(str).tolist())
+            if file_cols.get("date"):
+                parsed = pd.to_datetime(file_df[file_cols["date"][0]], errors="coerce")
+                all_dates.extend(parsed.dropna().tolist())
 
     p1, p2, p3 = st.columns(3)
     p1.metric("Files in project", len(saved_files), border=True)
@@ -647,17 +648,23 @@ def delete_file_dialog(file_row: dict):
         st.rerun()
 
 
+# Title first, before any database call — Neon's free tier scales to zero
+# when idle, and the first query after that can take several real seconds
+# to wake it back up. Previously the title itself didn't render until after
+# this call returned, so a cold start showed a completely blank page with
+# no visual confirmation the app had loaded at all.
+st.title("Optimus Data Analytics")
+
 # Database features degrade gracefully — a missing/unreachable DATABASE_URL
 # (e.g. local dev without .env set up) hides the project/save UI instead of
 # crashing the app; upload-and-analyse-only still works exactly as before.
 try:
-    projects = cached_list_projects()
+    with st.spinner("Loading projects..."):
+        projects = cached_list_projects()
     db_available = True
 except Exception:
     projects = []
     db_available = False
-
-st.title("Optimus Data Analytics")
 
 # ---- Top panel: project selection, upload, and Manage — all in one place ----
 # Previously project selection/upload lived in the sidebar while rename/
@@ -770,7 +777,8 @@ with st.container(border=True):
         if delete_col.button("Delete", key=f"open_delete_proj_{selected_project_id}", type="tertiary"):
             delete_project_dialog(current_project)
 
-        saved_files = cached_list_files(selected_project_id)
+        with st.spinner("Loading saved files..."):
+            saved_files = cached_list_files(selected_project_id)
         st.caption("Saved files" if saved_files else "No files saved to this project yet.")
         for f in saved_files:
             fcol1, fcol2, fcol3, fcol4 = st.columns([3, 2, 1, 1], vertical_alignment="center")
@@ -809,7 +817,8 @@ if uploaded is None and loaded_file_info is None:
     st.stop()
 
 if loaded_file_info is not None:
-    df = cached_load_file_records(loaded_file_info["file_id"])
+    with st.spinner(f"Loading {loaded_file_info['filename']}..."):
+        df = cached_load_file_records(loaded_file_info["file_id"])
     cols = loaded_file_info["detected_columns"]
     filename = loaded_file_info["filename"]
     data_identity = ("db_file", loaded_file_info["file_id"])

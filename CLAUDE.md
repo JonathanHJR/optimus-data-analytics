@@ -943,6 +943,53 @@ hadn't exercised either. Lesson for future chart-bucketing tests: always
 construct fixtures that force *every* branch of a threshold-based bucket
 choice, not just whichever one the first test dataset happens to land in.
 
+## Diagnosing real-world slowness, and adding loading spinners (2026-07-17)
+User asked whether the site's slowness is "to do with our Neon free tier."
+Rather than answer from theory, measured it directly: a bare `db.py` call
+to Neon came back in ~100ms (warm) — but a full Playwright network-timeline
+capture of an actual page load, done only a couple of minutes later, showed
+a **5.7-second dead gap** with zero network activity, sitting between the
+WebSocket's first frame and the browser requesting the Selectbox/Button/
+FileUploader JS chunks (i.e. before the Python script had gotten far enough
+to even describe those widgets back to the client). The first substantial
+thing `app.py` does is `cached_list_projects()` — a Neon query — and that
+gap is consistent with Neon having suspended again in the couple of
+minutes between the two measurements. Conclusion: yes, Neon's free-tier
+cold start is a real and current contributor, but it's intermittent by
+nature (fast once Neon's awake, slow again after a few idle minutes) —
+which is exactly why the first raw measurement looked fine and briefly
+suggested Neon wasn't the issue.
+
+Separately, user reported not seeing any loading indicator while waiting
+on a button click — a gap flagged as a cheap fix earlier in the DB-caching
+discussion but never actually implemented at the time (the conversation
+moved on to scoping the five deliverable-aligned features instead).
+Added `st.spinner(...)` around every point that can hit a real, uncached
+Neon round-trip: the initial project list load, the Manage panel's saved-
+files list, the single-file load path, and the Portfolio view's per-file
+aggregation loop (labelled with the file count, since that one can involve
+several sequential fetches). Also moved `st.title(...)` to render *before*
+the first Neon call rather than after — previously a cold start showed a
+completely blank page with no confirmation the app had even loaded,
+since the title itself was gated behind that first query.
+
+**Bug caught while making this change**: wrapping the Portfolio view's
+per-file loop in `with st.spinner(...):` shifted every line's indentation
+by one level, but the line directly after `parsed = pd.to_datetime(...)`
+(the `all_dates.extend(parsed.dropna().tolist())` call) was outside the
+edited text block and kept its old indentation — pulling it out from
+inside the `if file_cols.get("date"):` check to the same level as the
+`if` statements themselves. That would have made it run unconditionally
+after every file regardless of whether that file had a date column,
+referencing `parsed` even when it was never assigned for a dateless file.
+Caught by re-reading the diff immediately after applying it, before
+running anything. Fixed, then deliberately tested the Portfolio view
+against a project with one file that has a date column and one that
+doesn't (rather than only ever testing all-dates-present fixtures, which
+would never have exercised this path) — confirmed 40 total records
+summed correctly across both files, but only 20 "records with a detected
+date," matching just the dated file.
+
 ## Optimus API feasibility (investigated, not pursued) (2026-07-15)
 Investigated whether Optimus could be integrated with directly (API pull)
 instead of manual Excel export, to remove the human export-then-upload
