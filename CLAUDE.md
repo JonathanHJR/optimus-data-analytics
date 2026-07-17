@@ -990,6 +990,28 @@ would never have exercised this path) — confirmed 40 total records
 summed correctly across both files, but only 20 "records with a detected
 date," matching just the dated file.
 
+## Button-type consistency: Rename/Delete now match Load (2026-07-17)
+User noticed the Manage panel's "Rename"/"Delete" buttons (project-level,
+plus the per-file "Delete") didn't have the same filled-blue look as
+"Load" sitting right next to them, and asked for visual consistency.
+These three were deliberately set to `type="tertiary"` (plain text, no
+border/fill) in the earlier button-hierarchy pass, specifically to
+de-emphasise them relative to "Load" as the one primary action per row —
+but that reads as inconsistent when the buttons sit side by side in the
+same row, which is a fair, higher-priority call than the hierarchy
+argument. Changed project "Rename", project "Delete", and per-file
+"Delete" to `type="primary"`, matching "Load". Left everything else
+alone: the Portfolio view's "← Back to a single file" and the three AI
+tabs' "🗑 Delete this insight/classification/extraction" buttons weren't
+mentioned and aren't visually grouped with a "Load"-style button in the
+same row, so they stay `tertiary`.
+
+Verified visually via screenshot (all four buttons in the Manage panel
+now render as the same solid navy pill) and re-ran the full create/
+rename/upload/delete-file/delete-project dialog flow to confirm the
+type change didn't affect behaviour (purely visual). Test data cleaned
+up afterward.
+
 ## Optimus API feasibility (investigated, not pursued) (2026-07-15)
 Investigated whether Optimus could be integrated with directly (API pull)
 instead of manual Excel export, to remove the human export-then-upload

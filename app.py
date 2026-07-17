@@ -770,11 +770,11 @@ with st.container(border=True):
         # Plain bold text, not st.subheader — this is a per-project label
         # inside an otherwise compact control panel, not a section heading.
         header_col.markdown(f"**📁 {current_project['name']}**")
-        # tertiary: de-emphasized management actions, vs. the primary "Load"
-        # below that's the actual thing you come to this panel to do.
-        if rename_col.button("Rename", key=f"open_rename_{selected_project_id}", type="tertiary"):
+        # Same primary style as "Load" below, for visual consistency across
+        # every button in this panel.
+        if rename_col.button("Rename", key=f"open_rename_{selected_project_id}", type="primary"):
             rename_project_dialog(current_project)
-        if delete_col.button("Delete", key=f"open_delete_proj_{selected_project_id}", type="tertiary"):
+        if delete_col.button("Delete", key=f"open_delete_proj_{selected_project_id}", type="primary"):
             delete_project_dialog(current_project)
 
         with st.spinner("Loading saved files..."):
@@ -795,7 +795,7 @@ with st.container(border=True):
                 st.rerun()
             # Text, not a bare icon — matches the Rename/Delete convention
             # used one row up for the project itself.
-            if fcol4.button("Delete", key=f"delete_btn_{f['id']}", type="tertiary"):
+            if fcol4.button("Delete", key=f"delete_btn_{f['id']}", type="primary"):
                 delete_file_dialog(f)
 
         if saved_files:
