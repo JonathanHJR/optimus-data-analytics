@@ -990,6 +990,20 @@ would never have exercised this path) — confirmed 40 total records
 summed correctly across both files, but only 20 "records with a detected
 date," matching just the dated file.
 
+**Follow-up: user reported not seeing the spinner at all.** Investigated
+by temporarily injecting `time.sleep(4)` into `cached_list_projects()`
+(reverted immediately after, never committed) to force a slow path
+independent of Neon's actual, unpredictable warm/cold state at test time.
+With that forced delay: the custom "Loading projects..." spinner, the
+native Streamlit top-right rerun indicator, and an additional
+Streamlit-native "Running `cached_list_projects()`." caption all render
+correctly — confirmed via Playwright screenshot. So the mechanism itself
+works; the most likely explanation for not seeing it in normal use is
+simply that Neon was warm at the time (sub-second response, spinner never
+gets a chance to render — expected, not a bug). Only worth revisiting if
+someone reports a genuinely multi-second wait with *zero* visual feedback,
+not just "I don't usually see a spinner."
+
 ## Button-type consistency: Rename/Delete now match Load (2026-07-17)
 User noticed the Manage panel's "Rename"/"Delete" buttons (project-level,
 plus the per-file "Delete") didn't have the same filled-blue look as
